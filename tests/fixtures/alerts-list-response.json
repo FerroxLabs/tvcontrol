@@ -1,0 +1,32 @@
+{
+  "_note": "Seed fixture: pricealerts.tradingview.com/list_alerts response shape. Captured manually from research.",
+  "_captured_at": "2026-04-23",
+  "_tv_version": "unknown",
+  "s": "ok",
+  "r": [
+    {
+      "alert_id": "aid_seed_0001",
+      "symbol": "=\"{\\\"symbol\\\":\\\"NASDAQ:AAPL\\\"}\"",
+      "type": "price",
+      "message": "AAPL crossing 200",
+      "active": true,
+      "condition": "crossing",
+      "resolution": "60",
+      "create_time": 1700000000,
+      "last_fire_time": 0,
+      "expiration": 1800000000
+    },
+    {
+      "alert_id": "aid_seed_0002",
+      "symbol": "NYMEX:CL1!",
+      "type": "price",
+      "message": "CL1! greater than 80",
+      "active": false,
+      "condition": "greater_than",
+      "resolution": "D",
+      "create_time": 1700001000,
+      "last_fire_time": 1700005000,
+      "expiration": 0
+    }
+  ]
+}

@@ -1,0 +1,34 @@
+{
+  "name": "tvcontrol",
+  "version": "2.0.0",
+  "description": "AI remote control for TradingView Desktop — 88 MCP tools driving symbols, indicators, Pine Script, snapshots, sweeps, and live chart vision over CDP.",
+  "type": "module",
+  "main": "src/server.js",
+  "bin": {
+    "tv": "src/cli/index.js",
+    "tvcontrol": "src/cli/index.js"
+  },
+  "exports": {
+    ".": "./src/server.js",
+    "./core": "./src/core/index.js"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "tv": "node src/cli/index.js",
+    "test": "npm run test:offline",
+    "test:offline": "node --test tests/sanitization.test.js tests/replay.test.js tests/pine_analyze.test.js tests/cli.test.js tests/fixtures.test.js tests/errors.test.js tests/watchlist.test.js tests/alerts.test.js tests/state.test.js tests/sweep.test.js tests/vision.test.js tests/data_get_indicator.test.js tests/telemetry.test.js tests/tool_count.test.js tests/integration.test.js",
+    "test:e2e": "node --test tests/e2e.test.js",
+    "test:unit": "node --test tests/pine_analyze.test.js tests/cli.test.js",
+    "test:cli": "node --test tests/cli.test.js",
+    "test:all": "node --test tests/e2e.test.js tests/pine_analyze.test.js tests/cli.test.js",
+    "test:verbose": "node --test --test-reporter=spec tests/sanitization.test.js tests/replay.test.js tests/pine_analyze.test.js",
+    "test:count": "node --test --test-reporter=spec tests/e2e.test.js 2>&1 | tail -5"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "chrome-remote-interface": "^0.33.2"
+  }
+}

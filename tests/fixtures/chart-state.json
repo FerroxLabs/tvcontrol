@@ -1,0 +1,13 @@
+{
+  "_note": "Seed fixture: chart_get_state return value shape.",
+  "_captured_at": "2026-04-23",
+  "success": true,
+  "symbol": "NYMEX:CL1!",
+  "resolution": "15",
+  "chartType": 1,
+  "studies": [
+    { "id": "st_seed_0001", "name": "Relative Strength Index" },
+    { "id": "st_seed_0002", "name": "Moving Average Exponential" },
+    { "id": "st_seed_0003", "name": "Volume" }
+  ]
+}

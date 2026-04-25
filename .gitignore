@@ -1,0 +1,13 @@
+node_modules/
+screenshots/
+scripts/current.pine
+temp_*
+*.log
+discovery-log.json
+.ijfw/
+.planning/
+.DS_Store
+
+# Allow branding screenshots / capture guide (runtime tv screenshot output goes to /screenshots, which stays ignored)
+!assets/screenshots/
+!assets/screenshots/**

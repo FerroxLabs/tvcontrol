@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "tvcontrol": {
+      "command": "node",
+      "args": ["/absolute/path/to/tvcontrol/src/server.js"],
+      "env": {
+        "TV_MCP_TELEMETRY": "0"
+      }
+    }
+  }
+}

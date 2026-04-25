@@ -1,0 +1,17 @@
+[
+  {
+    "_note": "Seed fixture: pine-facade.tradingview.com/list response shape. Array of saved scripts.",
+    "scriptIdPart": "PUB;seed0001",
+    "scriptName": "My RSI Overlay",
+    "scriptTitle": "My RSI Overlay",
+    "version": 2,
+    "modified": 1700000000
+  },
+  {
+    "scriptIdPart": "PUB;seed0002",
+    "scriptName": "Session Profiler",
+    "scriptTitle": "Session Profiler",
+    "version": 1,
+    "modified": 1700010000
+  }
+]
