@@ -1,0 +1,26 @@
+# Dev tooling and internal
+.ijfw/
+.planning/
+.claude/
+CLAUDE.md
+agents/
+skills/
+
+# Tests and examples (not needed at runtime)
+tests/
+examples/
+
+# Scripts (launch scripts, smoke tests)
+scripts/
+
+# Assets (screenshots, branding — not needed at runtime)
+assets/
+screenshots/
+
+# Misc
+*.log
+temp_*
+discovery-log.json
+.DS_Store
+CONTRIBUTING.md
+SECURITY.md
