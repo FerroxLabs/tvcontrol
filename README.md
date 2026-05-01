@@ -71,24 +71,24 @@ If your version of TradingView reshapes some internal API, the verify battery is
 
 ## Quick starts
 
-### Path A. Claude Code, one prompt to install
+### Path A. Claude Code (one command)
 
-Paste this into Claude Code once and let it do the rest.
+```bash
+claude mcp add tvcontrol -- npx @seandonahoe/tvcontrol
+```
 
-> Install the TVControl MCP server. Clone https://github.com/TheRealSeanDonahoe/tvcontrol.git into ~/tvcontrol, run `npm install`, add it to my Claude Code MCP config at `~/.claude/.mcp.json` as a server named `tvcontrol` pointing at `~/tvcontrol/src/server.js`, then run `tv_launch` to start TradingView in debug mode and `tv_health_check` to confirm the connection.
-
-Claude Code will clone, install, register the server, and verify. Restart Claude Code when it finishes so the new MCP server loads.
+Then launch TradingView with the debug port (see Path B step 2), and verify:
+> *Use `tv_health_check`, then `chart_vision_read` to summarise my chart.*
 
 ### Path B. Manual, any MCP client
 
 ```bash
-# 1. Clone and install
-git clone https://github.com/TheRealSeanDonahoe/tvcontrol.git
-cd tvcontrol
-npm install
+# 1. Install
+npm install -g @seandonahoe/tvcontrol
+# or use npx without installing: npx @seandonahoe/tvcontrol
 
 # 2. Launch TradingView with the debug port enabled (one-time, per platform)
-./scripts/launch_tv_debug_mac.sh        # macOS
+./scripts/launch_tv_debug_mac.sh        # macOS  (clone repo for scripts)
 ./scripts/launch_tv_debug_linux.sh      # Linux
 scripts\launch_tv_debug.bat             # Windows
 
@@ -96,22 +96,20 @@ scripts\launch_tv_debug.bat             # Windows
 /path/to/TradingView --remote-debugging-port=9222
 ```
 
-Then add this to your MCP client config (`~/.claude/.mcp.json` for Claude Code, equivalent location for Codex / Gemini CLI / Cursor), replacing the path with your absolute path.
+Then add this to your MCP client config (`~/.claude/.mcp.json` for Claude Code, equivalent location for Codex / Gemini CLI / Cursor):
 
 ```json
 {
   "mcpServers": {
     "tvcontrol": {
-      "command": "node",
-      "args": ["/absolute/path/to/tvcontrol/src/server.js"]
+      "command": "npx",
+      "args": ["@seandonahoe/tvcontrol"]
     }
   }
 }
 ```
 
-Restart your client. A copy-pasteable example config lives at [`examples/mcp-config.example.json`](./examples/mcp-config.example.json).
-
-Verify with:
+Restart your client and verify:
 > *Use `tv_health_check`, then `chart_vision_read` to summarise my chart.*
 
 If you get back a paragraph describing your actual chart, you're up.
@@ -121,10 +119,8 @@ If you get back a paragraph describing your actual chart, you're up.
 Every MCP tool is also a `tv` command, JSON-out, jq-friendly. Skip the AI client entirely if you just want a programmable handle on your TradingView.
 
 ```bash
-git clone https://github.com/TheRealSeanDonahoe/tvcontrol.git
-cd tvcontrol
-npm install
-npm link                          # optional: puts `tv` on your PATH
+npm install -g @seandonahoe/tvcontrol
+# tv and tvcontrol are now on your PATH
 
 # launch TV with debug port (see Path B), then:
 tv status                         # connection check

@@ -1,5 +1,5 @@
 {
-  "name": "tvcontrol",
+  "name": "@seandonahoe/tvcontrol",
   "version": "2.0.0",
   "description": "AI remote control for TradingView Desktop — 88 MCP tools driving symbols, indicators, Pine Script, snapshots, sweeps, and live chart vision over CDP.",
   "type": "module",
