@@ -1,3 +1,5 @@
+@AGENTS.md
+
 # tvcontrol — Claude Instructions
 
 88 tools for reading and controlling a live TradingView Desktop chart via CDP (port 9222).

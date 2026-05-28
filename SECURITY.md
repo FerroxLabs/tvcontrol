@@ -4,7 +4,7 @@
 
 If you discover a security vulnerability in this project, please report it responsibly.
 
-Open a private security advisory via [GitHub Security Advisories](https://github.com/TheRealSeanDonahoe/tvcontrol/security/advisories/new).
+Open a private security advisory via [GitHub Security Advisories](https://github.com/ferroxlabs/tvcontrol/security/advisories/new).
 
 **Do not** open a public issue for security vulnerabilities.
 

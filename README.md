@@ -4,7 +4,7 @@
 
 # TVControl
 
-### TradingView MCP System
+### TradingView MCP System · by [Ferrox Labs](https://github.com/ferroxlabs)
 
 > **Tell your AI what you want from your TradingView chart. Watch it happen on screen.**
 
@@ -26,7 +26,7 @@ Paste any of these into Claude Code (or your MCP-compatible agent of choice) onc
 A single tool call returns symbol, timeframe, indicator values, custom Pine drawings, OHLCV summary, and a screenshot. Roughly 5 to 10 KB back instead of ~80 KB across five separate calls.
 
 **Pair-program in Pine Script.**
-> *Write me a Pine v6 indicator that plots a 20-period EMA in blue and a 50-period EMA in orange, then compile it on my chart. Fix any errors. Save it as "Sean EMA Cross".*
+> *Write me a Pine v6 indicator that plots a 20-period EMA in blue and a 50-period EMA in orange, then compile it on my chart. Fix any errors. Save it as "EMA Cross".*
 
 Inject, server-side compile, read errors, fix, save. The compiler errors come back to the agent directly, so iteration is seconds, not minutes.
 
@@ -71,24 +71,24 @@ If your version of TradingView reshapes some internal API, the verify battery is
 
 ## Quick starts
 
-### Path A. Claude Code (one command)
+### Path A. Claude Code, one prompt to install
 
-```bash
-claude mcp add tvcontrol -- npx @seandonahoe/tvcontrol
-```
+Paste this into Claude Code once and let it do the rest.
 
-Then launch TradingView with the debug port (see Path B step 2), and verify:
-> *Use `tv_health_check`, then `chart_vision_read` to summarise my chart.*
+> Install the TVControl MCP server. Clone https://github.com/ferroxlabs/tvcontrol.git into ~/tvcontrol, run `npm install`, add it to my Claude Code MCP config at `~/.claude/.mcp.json` as a server named `tvcontrol` pointing at `~/tvcontrol/src/server.js`, then run `tv_launch` to start TradingView in debug mode and `tv_health_check` to confirm the connection.
+
+Claude Code will clone, install, register the server, and verify. Restart Claude Code when it finishes so the new MCP server loads.
 
 ### Path B. Manual, any MCP client
 
 ```bash
-# 1. Install
-npm install -g @seandonahoe/tvcontrol
-# or use npx without installing: npx @seandonahoe/tvcontrol
+# 1. Clone and install
+git clone https://github.com/ferroxlabs/tvcontrol.git
+cd tvcontrol
+npm install
 
 # 2. Launch TradingView with the debug port enabled (one-time, per platform)
-./scripts/launch_tv_debug_mac.sh        # macOS  (clone repo for scripts)
+./scripts/launch_tv_debug_mac.sh        # macOS
 ./scripts/launch_tv_debug_linux.sh      # Linux
 scripts\launch_tv_debug.bat             # Windows
 
@@ -96,20 +96,22 @@ scripts\launch_tv_debug.bat             # Windows
 /path/to/TradingView --remote-debugging-port=9222
 ```
 
-Then add this to your MCP client config (`~/.claude/.mcp.json` for Claude Code, equivalent location for Codex / Gemini CLI / Cursor):
+Then add this to your MCP client config (`~/.claude/.mcp.json` for Claude Code, equivalent location for Codex / Gemini CLI / Cursor), replacing the path with your absolute path.
 
 ```json
 {
   "mcpServers": {
     "tvcontrol": {
-      "command": "npx",
-      "args": ["@seandonahoe/tvcontrol"]
+      "command": "node",
+      "args": ["/absolute/path/to/tvcontrol/src/server.js"]
     }
   }
 }
 ```
 
-Restart your client and verify:
+Restart your client. A copy-pasteable example config lives at [`examples/mcp-config.example.json`](./examples/mcp-config.example.json).
+
+Verify with:
 > *Use `tv_health_check`, then `chart_vision_read` to summarise my chart.*
 
 If you get back a paragraph describing your actual chart, you're up.
@@ -119,8 +121,10 @@ If you get back a paragraph describing your actual chart, you're up.
 Every MCP tool is also a `tv` command, JSON-out, jq-friendly. Skip the AI client entirely if you just want a programmable handle on your TradingView.
 
 ```bash
-npm install -g @seandonahoe/tvcontrol
-# tv and tvcontrol are now on your PATH
+git clone https://github.com/ferroxlabs/tvcontrol.git
+cd tvcontrol
+npm install
+npm link                          # optional: puts `tv` on your PATH
 
 # launch TV with debug port (see Path B), then:
 tv status                         # connection check
@@ -234,7 +238,7 @@ By using this software, you acknowledge that:
 
 1. You are solely responsible for ensuring your use complies with [TradingView's Terms of Use](https://www.tradingview.com/policies/) and all applicable laws.
 2. TradingView's Terms of Use **restrict automated data collection, scraping, and non-display usage** of their platform and data. TVControl uses Chrome DevTools Protocol to programmatically interact with the TradingView Desktop app, which may conflict with those terms.
-3. You assume all risk. The author is not responsible for account bans, suspensions, legal actions, or any consequences resulting from use of this tool.
+3. You assume all risk. Ferrox Labs and its contributors are not responsible for account bans, suspensions, legal actions, or any consequences resulting from use of this tool.
 4. This tool **must not be used** for: redistributing or commercially exploiting TradingView's market data; circumventing TradingView's access controls or paywalls; performing automated live trading; violating intellectual property rights of Pine Script authors; or connecting to TradingView's servers (all access is via the locally running Desktop app).
 5. Streaming functionality monitors only your local TradingView Desktop instance. It does not reach TradingView's servers.
 6. Market data accessed through this tool remains subject to exchange and provider licensing terms. **Do not redistribute, store, or commercially exploit it.**
@@ -260,3 +264,9 @@ Credit for the groundwork belongs to the upstream author. If you came here looki
 MIT. See [LICENSE](./LICENSE).
 
 The MIT license applies to the source code of this project only. It does not grant rights to TradingView's software, data, trademarks, or other intellectual property.
+
+---
+
+<p align="center">
+  Built and maintained by <strong><a href="https://github.com/ferroxlabs">Ferrox Labs</a></strong>.
+</p>
