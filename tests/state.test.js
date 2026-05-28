@@ -487,7 +487,7 @@ describe('restore()', () => {
     }
   });
 
-  it('clear-before-restore: batched removeEntity for every existing study (W4-M1)', async () => {
+  it('clear-before-restore: batched removeEntity for every existing study', async () => {
     const dir = join(TMP, 'restore-clear-studies');
     const snap = {
       ...BASE_SNAP,
@@ -521,7 +521,7 @@ describe('restore()', () => {
     assert.equal(batchEvals, 1, 'Expected ONE batched evaluate, not N+1 per-study calls');
   });
 
-  it('pre-clear failures land in skipped[] (audit lens B HIGH)', async () => {
+  it('pre-clear failures land in skipped[]', async () => {
     const dir = join(TMP, 'restore-clear-fail');
     const snap = { ...BASE_SNAP, studies: [{ name: 'RSI', inputs: [] }] };
     writeSnap(dir, 'clear-fail', snap);

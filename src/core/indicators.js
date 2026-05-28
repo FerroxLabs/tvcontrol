@@ -7,7 +7,16 @@ import { ClassifiedError, CATEGORIES } from '../errors.js';
 const CHART_API = 'window.TradingViewApi._activeChartWidgetWV.value()';
 
 export async function setInputs({ entity_id, inputs: inputsRaw }) {
-  const inputs = inputsRaw ? (typeof inputsRaw === 'string' ? JSON.parse(inputsRaw) : inputsRaw) : undefined;
+  let inputs;
+  try {
+    inputs = inputsRaw ? (typeof inputsRaw === 'string' ? JSON.parse(inputsRaw) : inputsRaw) : undefined;
+  } catch (err) {
+    throw new ClassifiedError(
+      CATEGORIES.INVALID_ARGUMENT,
+      `inputs is not valid JSON: ${err.message}`,
+      { hint: 'Pass inputs as a JSON object or a JSON-encoded object string, e.g. {"length": 50}.' },
+    );
+  }
   if (!entity_id) throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'entity_id is required. Use chart_get_state to find study IDs.');
   if (!inputs || typeof inputs !== 'object' || Object.keys(inputs).length === 0) {
     throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'inputs must be a non-empty object, e.g. { length: 50 }');

@@ -6,6 +6,8 @@ temp_*
 discovery-log.json
 .ijfw/
 .planning/
+ijfw/
+*.bak
 .DS_Store
 
 # Allow branding screenshots / capture guide (runtime tv screenshot output goes to /screenshots, which stays ignored)

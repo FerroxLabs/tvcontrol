@@ -6,6 +6,12 @@
 import { evaluate, evaluateAsync, getClient } from '../connection.js';
 import { ClassifiedError, CATEGORIES } from '../errors.js';
 
+// CDP keyboard modifier bitmask: 2=Ctrl, 8=Meta(Cmd). TradingView's Pine editor
+// uses the platform-primary modifier for Save (Cmd/Ctrl+S) and Add-to-chart /
+// Compile (Cmd/Ctrl+Enter). Hardcoding Ctrl was a silent no-op on macOS
+// whenever the DOM-click fallback also missed.
+const PRIMARY_MODIFIER = process.platform === 'darwin' ? 8 : 2;
+
 // Escape a string for safe use inside `new RegExp(...)`.
 // Pine identifiers today are \w+ (no metachars), but defense-in-depth keeps
 // this safe if the declaration pattern ever broadens (Unicode, dotted names).
@@ -93,26 +99,32 @@ function stripCommentsAndStrings(line) {
   while (i < line.length) {
     // Single-line comment — drop rest of line
     if (line[i] === '/' && line[i + 1] === '/') break;
-    // Double-quoted string
+    // Double-quoted string — replace with EQUAL-LENGTH whitespace, not a single
+    // space. Callers feed the stripped line back into regexes and use m.index
+    // against the ORIGINAL line (and extractBalancedCall offsets); collapsing a
+    // literal to one space shifts every later column left, corrupting those
+    // offsets and producing false/missed diagnostics.
     if (line[i] === '"') {
+      const start = i;
       i++;
       while (i < line.length && line[i] !== '"') {
         if (line[i] === '\\') i++; // skip escape
         i++;
       }
-      i++; // closing quote
-      result += ' '; // placeholder to preserve token boundaries
+      i++; // closing quote (may run one past EOL if unterminated)
+      result += ' '.repeat(Math.min(i, line.length) - start);
       continue;
     }
-    // Single-quoted string
+    // Single-quoted string — same length-preserving treatment.
     if (line[i] === "'") {
+      const start = i;
       i++;
       while (i < line.length && line[i] !== "'") {
         if (line[i] === '\\') i++;
         i++;
       }
       i++;
-      result += ' ';
+      result += ' '.repeat(Math.min(i, line.length) - start);
       continue;
     }
     result += line[i];
@@ -129,12 +141,24 @@ function extractBalancedCall(lines, startLine, startCol) {
   let text = '';
   let depth = 0;
   let started = false;
+  let inStr = null;   // active string delimiter (" or ') or null
+  let esc = false;    // previous char was a backslash inside a string
   for (let li = startLine; li < lines.length; li++) {
     const seg = li === startLine ? lines[li].slice(startCol) : lines[li];
     for (const ch of seg) {
+      text += ch;
+      if (inStr) {
+        // Inside a string literal: parens here are data, not call structure.
+        // Without this, security("AAPL", title="(temp)") decremented depth
+        // early and returned a truncated call, breaking downstream analysis.
+        if (esc) esc = false;
+        else if (ch === '\\') esc = true;
+        else if (ch === inStr) inStr = null;
+        continue;
+      }
+      if (ch === '"' || ch === "'") { inStr = ch; continue; }
       if (ch === '(') { depth++; started = true; }
       else if (ch === ')') { depth--; }
-      text += ch;
       if (started && depth === 0) return { text, endLine: li };
     }
     text += '\n';
@@ -157,12 +181,23 @@ export function analyze({ source }) {
 
   const arrays = new Map();
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
+    // Strip comments/strings first so a commented-out or in-string declaration
+    // (e.g. `// arr = array.new(5)`) doesn't register a phantom array.
+    const line = stripCommentsAndStrings(lines[i]);
     const fromMatch = line.match(/(\w+)\s*=\s*array\.from\(([^)]*)\)/);
     if (fromMatch) {
       const name = fromMatch[1].trim();
       const args = fromMatch[2].trim();
-      const size = args === '' ? 0 : args.split(',').length;
+      // `[^)]*` greedily eats until the first `)`, so `array.from(foo(m, r))`
+      // captures `foo(m, r` and a naive split on `,` would count nested
+      // call args as elements (yielding wrong size, hence spurious bounds
+      // diagnostics on valid Pine). When the captured slice contains a
+      // `(`, the call has a nested expression; we can't statically count
+      // its elements, so leave size as `null` (unknown) and stop bounds-
+      // checking against this array.
+      let size = null;
+      if (args === '') size = 0;
+      else if (!args.includes('(')) size = args.split(',').length;
       arrays.set(name, { name, size, line: i + 1 });
       continue;
     }
@@ -175,7 +210,9 @@ export function analyze({ source }) {
   }
 
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
+    // Strip first: a commented-out `// array.get(arr, -1)` or an in-string
+    // `"array.get(x, 10)"` must not emit a false out-of-bounds diagnostic.
+    const line = stripCommentsAndStrings(lines[i]);
     const pattern = /array\.(get|set)\(\s*(\w+)\s*,\s*(-?\d+)/g;
     let match;
     while ((match = pattern.exec(line)) !== null) {
@@ -195,7 +232,7 @@ export function analyze({ source }) {
   }
 
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
+    const line = stripCommentsAndStrings(lines[i]);
     const firstLastPattern = /(\w+)\.(first|last)\(\)/g;
     let match;
     while ((match = firstLastPattern.exec(line)) !== null) {
@@ -338,6 +375,15 @@ export async function check({ source }) {
   const formData = new URLSearchParams();
   formData.append('source', source);
 
+  // NOTE: this is a host-side Guest fetch, not an authenticated
+  // in-page call. Deliberate tradeoff: it keeps `pine_check` working with
+  // TradingView CLOSED (no CDP session needed) for the common case of public
+  // scripts. Limitation: premium/private indicators won't resolve under Guest,
+  // and the request originates from the host IP (Guest compile checks are
+  // rate-limited per IP). Routing through evaluateAsync with credentials would
+  // fix both but requires TV running and a live-verified response shape — not
+  // changed blind. If you add an authenticated path, keep this Guest fetch as a
+  // fallback so offline checks still work.
   const response = await fetch(
     'https://pine-facade.tradingview.com/pine-facade/translate_light?user_name=Guest&pine_id=00000000-0000-0000-0000-000000000000',
     {
@@ -465,7 +511,7 @@ export async function compile() {
 
   if (!clicked) {
     const c = await getClient();
-    await c.Input.dispatchKeyEvent({ type: 'keyDown', modifiers: 2, key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+    await c.Input.dispatchKeyEvent({ type: 'keyDown', modifiers: PRIMARY_MODIFIER, key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
     await c.Input.dispatchKeyEvent({ type: 'keyUp', key: 'Enter', code: 'Enter' });
   }
 
@@ -503,7 +549,7 @@ export async function save() {
   if (!editorReady) throw new ClassifiedError(CATEGORIES.PINE_EDITOR_CLOSED, 'Could not open Pine Editor.');
 
   const c = await getClient();
-  await c.Input.dispatchKeyEvent({ type: 'keyDown', modifiers: 2, key: 's', code: 'KeyS', windowsVirtualKeyCode: 83 });
+  await c.Input.dispatchKeyEvent({ type: 'keyDown', modifiers: PRIMARY_MODIFIER, key: 's', code: 'KeyS', windowsVirtualKeyCode: 83 });
   await c.Input.dispatchKeyEvent({ type: 'keyUp', key: 's', code: 'KeyS' });
   await new Promise(r => setTimeout(r, 800));
 
@@ -619,7 +665,7 @@ export async function smartCompile() {
 
   if (!buttonClicked) {
     const c = await getClient();
-    await c.Input.dispatchKeyEvent({ type: 'keyDown', modifiers: 2, key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+    await c.Input.dispatchKeyEvent({ type: 'keyDown', modifiers: PRIMARY_MODIFIER, key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
     await c.Input.dispatchKeyEvent({ type: 'keyUp', key: 'Enter', code: 'Enter' });
   }
 

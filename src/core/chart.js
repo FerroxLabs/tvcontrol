@@ -93,7 +93,19 @@ export async function setType({ chart_type, _deps }) {
 
 export async function manageIndicator({ action, indicator, entity_id, inputs: inputsRaw, _deps }) {
   const { evaluate } = _resolve(_deps);
-  const inputs = inputsRaw ? (typeof inputsRaw === 'string' ? JSON.parse(inputsRaw) : inputsRaw) : undefined;
+  let inputs;
+  try {
+    inputs = inputsRaw ? (typeof inputsRaw === 'string' ? JSON.parse(inputsRaw) : inputsRaw) : undefined;
+  } catch (err) {
+    // Malformed caller JSON must read as INVALID_ARGUMENT, not the generic
+    // api_unexpected ("TradingView returned unexpected shape") it would become
+    // after toErrorPayload normalizes a raw SyntaxError.
+    throw new ClassifiedError(
+      CATEGORIES.INVALID_ARGUMENT,
+      `inputs is not valid JSON: ${err.message}`,
+      { hint: 'Pass inputs as a JSON object or a JSON-encoded object string, e.g. {"length": 50}.' },
+    );
+  }
 
   if (action === 'add') {
     const inputArr = inputs ? Object.entries(inputs).map(([k, v]) => ({ id: k, value: v })) : [];
@@ -107,7 +119,18 @@ export async function manageIndicator({ action, indicator, entity_id, inputs: in
     await new Promise(r => setTimeout(r, 1500));
     const after = await evaluate(`${CHART_API}.getAllStudies().map(function(s) { return s.id; })`);
     const newIds = (after || []).filter(id => !(before || []).includes(id));
-    return { success: newIds.length > 0, action: 'add', indicator, entity_id: newIds[0] || null, new_study_count: newIds.length };
+    if (newIds.length === 0) {
+      // Old behavior returned { success:false } with no category/hint, which an
+      // agent can't act on — and a slow add that actually succeeded after the
+      // settle window looked identical to a wrong indicator name, leading to
+      // duplicate re-adds. Surface a categorized, actionable error instead.
+      throw new ClassifiedError(
+        CATEGORIES.TV_UI_CHANGED,
+        `Indicator "${indicator}" did not appear on the chart after add.`,
+        { hint: 'Use the FULL indicator name (e.g. "Relative Strength Index", not "RSI"). If the name is correct, the add may have exceeded the settle window — re-check chart_get_state before retrying so you do not add a duplicate.' },
+      );
+    }
+    return { success: true, action: 'add', indicator, entity_id: newIds[0], new_study_count: newIds.length };
   } else if (action === 'remove') {
     if (!entity_id) throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'entity_id required for remove action. Use chart_get_state to find study IDs.');
     await evaluate(`

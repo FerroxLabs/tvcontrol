@@ -3,7 +3,7 @@
  */
 import { getClient, getTargetInfo, evaluate } from '../connection.js';
 import { existsSync } from 'fs';
-import { execSync, spawn } from 'child_process';
+import { execFileSync, spawn } from 'child_process';
 import { ClassifiedError, CATEGORIES } from '../errors.js';
 
 export async function healthCheck() {
@@ -192,15 +192,23 @@ export async function launch({ port, kill_existing } = {}) {
 
   if (!tvPath) {
     try {
-      const cmd = platform === 'win32' ? 'where TradingView.exe' : 'which tradingview';
-      tvPath = execSync(cmd, { timeout: 3000 }).toString().trim().split('\n')[0];
+      // execFileSync (not execSync) so no shell is involved — the program
+      // and args are passed directly to the OS. Defense-in-depth: today
+      // these args are literal strings, but switching to the no-shell form
+      // makes future maintainers' interpolation mistakes a non-issue.
+      const cmd = platform === 'win32' ? 'where' : 'which';
+      const arg = platform === 'win32' ? 'TradingView.exe' : 'tradingview';
+      tvPath = execFileSync(cmd, [arg], { timeout: 3000 }).toString().trim().split('\n')[0];
       if (tvPath && !existsSync(tvPath)) tvPath = null;
     } catch { /* ignore */ }
   }
 
   if (!tvPath && platform === 'darwin') {
     try {
-      const found = execSync('mdfind "kMDItemFSName == TradingView.app" | head -1', { timeout: 5000 }).toString().trim();
+      // mdfind with no shell pipe — take the first line in JS instead of
+      // `| head -1`. Same outcome, no shell interpretation.
+      const raw = execFileSync('mdfind', ['kMDItemFSName == TradingView.app'], { timeout: 5000 }).toString();
+      const found = raw.split('\n').map(s => s.trim()).find(Boolean);
       if (found) {
         const candidate = `${found}/Contents/MacOS/TradingView`;
         if (existsSync(candidate)) tvPath = candidate;
@@ -218,19 +226,48 @@ export async function launch({ port, kill_existing } = {}) {
 
   if (killFirst) {
     try {
-      if (platform === 'win32') execSync('taskkill /F /IM TradingView.exe', { timeout: 5000 });
-      else execSync('pkill -f TradingView', { timeout: 5000 });
+      if (platform === 'win32') {
+        execFileSync('taskkill', ['/F', '/IM', 'TradingView.exe'], { timeout: 5000 });
+      } else {
+        // -x: exact process-name match. -f matches the full command line, so
+        // any process whose path or args contained "TradingView" — including
+        // the MCP server itself when running from a directory named
+        // .../TradingView/... — would be killed too. -x scopes to the
+        // binary name only.
+        execFileSync('pkill', ['-x', 'TradingView'], { timeout: 5000 });
+      }
       await new Promise(r => setTimeout(r, 1500));
     } catch { /* may not be running */ }
   }
 
   const child = spawn(tvPath, [`--remote-debugging-port=${cdpPort}`], { detached: true, stdio: 'ignore' });
+  // Track exit so we can distinguish "binary crashed at startup" from "slow
+  // to open" in the poll loop below. Without this, both cases reach the
+  // 15s timeout and return success:true with a "cdp_ready: false" warning
+  // — caller can't tell which.
+  let childExited = false;
+  let childExitInfo = null;
+  child.on('exit', (code, signal) => {
+    childExited = true;
+    childExitInfo = { code, signal };
+  });
+  child.on('error', (err) => {
+    childExited = true;
+    childExitInfo = { error: err.message };
+  });
   child.unref();
 
+  const http = await import('http');
   for (let i = 0; i < 15; i++) {
     await new Promise(r => setTimeout(r, 1000));
+    if (childExited) {
+      throw new ClassifiedError(
+        CATEGORIES.TV_NOT_RUNNING,
+        `TradingView exited during startup: ${JSON.stringify(childExitInfo)}`,
+        { hint: 'Binary launched but quit before opening the CDP port. Try running it manually to see the failure mode.' },
+      );
+    }
     try {
-      const http = await import('http');
       const ready = await new Promise((resolve) => {
         http.get(`http://localhost:${cdpPort}/json/version`, (res) => {
           let data = '';

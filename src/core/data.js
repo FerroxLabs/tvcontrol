@@ -10,13 +10,18 @@ const _DATA_DEPS = new Set(['evaluate', 'openPanel', 'wait']);
 
 const MAX_OHLCV_BARS = 500;
 const MAX_TRADES = 20;
+// Cap the equity-curve payload. A 1m-over-a-year backtest produces hundreds of
+// thousands of points; serializing that across CDP (returnByValue) can breach
+// V8 string limits / max payload and OOM the Node process. Downsample to at
+// most this many points (the final point is always preserved exactly).
+const MAX_EQUITY_BARS = 5000;
 const CHART_API = KNOWN_PATHS.chartApi;
 const BARS_PATH = KNOWN_PATHS.mainSeriesBars;
 
 // Allowlist of (collectionName, mapKey) pairs known to TradingView's internal
 // _primitivesCollection. Both values are interpolated raw into the evaluate
 // string for property access (`pc.${collectionName}` etc.) so any new value
-// MUST be reviewed and added here. W4-M8 defense-in-depth.
+// MUST be reviewed and added here. Defense-in-depth allowlist.
 const ALLOWED_GRAPHICS_COLLECTIONS = Object.freeze({
   dwglines:       new Set(['lines']),
   dwglabels:      new Set(['labels']),
@@ -121,7 +126,11 @@ export async function getOhlcv({ count, summary } = {}) {
       high: Math.max(...highs), low: Math.min(...lows),
       range: Math.round((Math.max(...highs) - Math.min(...lows)) * 100) / 100,
       change: Math.round((last.close - first.open) * 100) / 100,
-      change_pct: Math.round(((last.close - first.open) / first.open) * 10000) / 100 + '%',
+      // Guard the divisor: first.open can legitimately be 0 (some synthetic /
+      // crypto instruments) or absent, which would otherwise yield "Infinity%"
+      // or "NaN%" and poison any consumer (e.g. chart_vision_read) that parses
+      // the field as a number.
+      change_pct: first.open ? Math.round(((last.close - first.open) / first.open) * 10000) / 100 + '%' : 'N/A',
       avg_volume: Math.round(volumes.reduce((a, b) => a + b, 0) / volumes.length),
       last_5_bars: bars.slice(-5),
     };
@@ -335,7 +344,18 @@ export async function getTrades({ max_trades } = {}) {
       } catch(e) { return {trades: [], source: 'internal_api', error: e.message}; }
     })()
   `);
-  return { success: true, count: trades?.trades?.length || 0, source: trades?.source, trades: trades?.trades || [], error: trades?.error };
+  if (trades?.error) {
+    // Old contract returned success:true with an embedded `error`, which is
+    // indistinguishable from a legitimately flat backtest. Throw so the caller
+    // gets a categorized failure (matching getStrategyResults).
+    const noStrategy = /no strategy/i.test(trades.error);
+    throw new ClassifiedError(
+      noStrategy ? CATEGORIES.STUDY_NOT_FOUND : CATEGORIES.API_UNEXPECTED,
+      `getTrades: ${trades.error}`,
+      noStrategy ? { hint: 'Load a strategy and open the Strategy Tester panel (ui_open_panel({panel:"strategy-tester", action:"open"})), then retry.' } : undefined,
+    );
+  }
+  return { success: true, count: trades?.trades?.length || 0, source: trades?.source, trades: trades?.trades || [] };
 }
 
 export async function getEquity() {
@@ -354,13 +374,24 @@ export async function getEquity() {
         if (strat.equityData) {
           var eq = typeof strat.equityData === 'function' ? strat.equityData() : strat.equityData;
           if (eq && typeof eq.value === 'function') eq = eq.value();
-          if (Array.isArray(eq)) data = eq;
+          if (Array.isArray(eq)) {
+            if (eq.length > ${MAX_EQUITY_BARS}) {
+              var stride0 = Math.ceil(eq.length / ${MAX_EQUITY_BARS});
+              for (var ei = 0; ei < eq.length; ei += stride0) data.push(eq[ei]);
+              if (data[data.length-1] !== eq[eq.length-1]) data.push(eq[eq.length-1]);
+            } else { data = eq; }
+          }
         }
         if (data.length === 0 && strat.bars) {
           var bars = typeof strat.bars === 'function' ? strat.bars() : strat.bars;
           if (bars && typeof bars.lastIndex === 'function') {
             var end = bars.lastIndex(); var start = bars.firstIndex();
-            for (var i = start; i <= end; i++) { var v = bars.valueAt(i); if (v) data.push({time: v[0], equity: v[1], drawdown: v[2] || null}); }
+            // Downsample with a stride instead of pushing every bar — an
+            // unbounded firstIndex..lastIndex walk is the OOM/payload risk.
+            var total = end - start + 1;
+            var stride = total > ${MAX_EQUITY_BARS} ? Math.ceil(total / ${MAX_EQUITY_BARS}) : 1;
+            for (var i = start; i <= end; i += stride) { var v = bars.valueAt(i); if (v) data.push({time: v[0], equity: v[1], drawdown: v[2] || null}); }
+            if (stride > 1) { var vl = bars.valueAt(end); if (vl) data.push({time: vl[0], equity: vl[1], drawdown: vl[2] || null}); }
           }
         }
         if (data.length === 0) {
@@ -376,7 +407,15 @@ export async function getEquity() {
       } catch(e) { return {data: [], source: 'internal_api', error: e.message}; }
     })()
   `);
-  return { success: true, data_points: equity?.data?.length || 0, source: equity?.source, data: equity?.data || [], equity_summary: equity?.equity_summary, note: equity?.note, error: equity?.error };
+  if (equity?.error) {
+    const noStrategy = /no strategy/i.test(equity.error);
+    throw new ClassifiedError(
+      noStrategy ? CATEGORIES.STUDY_NOT_FOUND : CATEGORIES.API_UNEXPECTED,
+      `getEquity: ${equity.error}`,
+      noStrategy ? { hint: 'Load a strategy and open the Strategy Tester panel (ui_open_panel({panel:"strategy-tester", action:"open"})), then retry.' } : undefined,
+    );
+  }
+  return { success: true, data_points: equity?.data?.length || 0, source: equity?.source, data: equity?.data || [], equity_summary: equity?.equity_summary, note: equity?.note };
 }
 
 export async function getQuote({ symbol } = {}) {
@@ -397,8 +436,8 @@ export async function getQuote({ symbol } = {}) {
       try {
         var bidEl = document.querySelector('[class*="bid"] [class*="price"], [class*="dom-"] [class*="bid"]');
         var askEl = document.querySelector('[class*="ask"] [class*="price"], [class*="dom-"] [class*="ask"]');
-        if (bidEl) quote.bid = parseFloat(bidEl.textContent.replace(/[^0-9.\\-]/g, ''));
-        if (askEl) quote.ask = parseFloat(askEl.textContent.replace(/[^0-9.\\-]/g, ''));
+        if (bidEl) { var bidV = parseFloat(bidEl.textContent.replace(/[^0-9.\\-]/g, '')); if (!isNaN(bidV)) quote.bid = bidV; }
+        if (askEl) { var askV = parseFloat(askEl.textContent.replace(/[^0-9.\\-]/g, '')); if (!isNaN(askV)) quote.ask = askV; }
       } catch(e) {}
       try {
         var hdr = document.querySelector('[class*="headerRow"] [class*="last-"]');
@@ -548,12 +587,16 @@ export async function getPineTables({ study_filter } = {}) {
   if (!raw || raw.length === 0) return { success: true, count: 0, studies: [] };
 
   const studies = raw.map(s => {
-    const tables = {};
+    // Null-proto containers: tid/row/col come from page-supplied indicator
+    // data. A malicious study naming a row/col "__proto__" would otherwise walk
+    // the prototype chain on the assignment below and pollute Object.prototype.
+    // Object.create(null) has no prototype to poison.
+    const tables = Object.create(null);
     for (const item of s.items) {
       const v = item.raw;
       const tid = v.tid || 0;
-      if (!tables[tid]) tables[tid] = {};
-      if (!tables[tid][v.row]) tables[tid][v.row] = {};
+      if (!tables[tid]) tables[tid] = Object.create(null);
+      if (!tables[tid][v.row]) tables[tid][v.row] = Object.create(null);
       tables[tid][v.row][v.col] = v.t || '';
     }
     const tableList = Object.entries(tables).map(([tid, rows]) => {

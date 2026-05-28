@@ -21,9 +21,36 @@
  * (best-effort; failures recorded in cleanup_warnings).
  */
 import CDP from 'chrome-remote-interface';
+import { ClassifiedError, CATEGORIES } from '../errors.js';
 
 const CDP_HOST = 'localhost';
 const CDP_PORT = 9222;
+// Per-call ceiling for a worker's Runtime.evaluate. Mirrors
+// DEFAULT_EVAL_TIMEOUT_MS in connection.js — without it a hung backtest or a
+// navigation-in-flight inside a worker tab leaves the evaluate promise pending
+// forever, wedging that worker's whole queue and the outer Promise.all.
+const WORKER_EVAL_TIMEOUT_MS = 20000;
+// Coarse backstop around a whole combo (setSymbol → setInputs → readMetrics).
+// Matches the serial sweep's DEFAULT_TIMEOUT_PER_COMBO_MS; overridable per run.
+const DEFAULT_TIMEOUT_PER_COMBO_MS = 30000;
+
+// Reject if `promise` doesn't settle within `ms`. Clears the timer on settle
+// so the timeout handle can't leak. Mirrors withTimeout in sweep.js.
+export async function _withTimeout(promise, ms, label) {
+  if (!ms || ms <= 0) return promise;
+  let timer;
+  const timeoutPromise = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new ClassifiedError(
+      CATEGORIES.CDP_DISCONNECTED,
+      `Parallel combo timed out after ${ms}ms${label ? ` (${label})` : ''}`,
+    )), ms);
+  });
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /**
  * Open a fresh TradingView chart tab and return its CDP target descriptor.
@@ -37,7 +64,14 @@ async function _spawnTab() {
   if (!resp.ok) {
     // Some Chrome builds want POST; try once.
     const resp2 = await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/new?${url}`);
-    if (!resp2.ok) throw new Error(`Failed to spawn tab: HTTP ${resp.status}`);
+    if (!resp2.ok) {
+      // Report BOTH statuses — the old message claimed the PUT status when
+      // it was actually the GET fallback that failed last.
+      throw new ClassifiedError(
+        CATEGORIES.API_UNEXPECTED,
+        `Failed to spawn tab: PUT HTTP ${resp.status}, GET HTTP ${resp2.status}`,
+      );
+    }
     return await resp2.json();
   }
   return await resp.json();
@@ -66,16 +100,38 @@ class SweepWorker {
   }
 
   async evaluate(expression, opts = {}) {
-    const result = await this.cdp.Runtime.evaluate({
+    const timeoutMs = opts.timeoutMs === undefined ? WORKER_EVAL_TIMEOUT_MS : opts.timeoutMs;
+    const evalPromise = this.cdp.Runtime.evaluate({
       expression,
       returnByValue: true,
       awaitPromise: opts.awaitPromise ?? false,
     });
+    // Same unhandled-rejection guard as connection.evaluate(): if the timeout
+    // wins the race, this CDP promise may reject later (tab closed / context
+    // destroyed) and crash the whole sweep process unless it has a handler.
+    evalPromise.catch(() => {});
+    let result;
+    if (timeoutMs && timeoutMs > 0) {
+      let timer;
+      const timeoutPromise = new Promise((_, rej) => {
+        timer = setTimeout(() => rej(new ClassifiedError(
+          CATEGORIES.CDP_DISCONNECTED,
+          `worker ${this.id}: evaluate timed out after ${timeoutMs}ms`,
+        )), timeoutMs);
+      });
+      try {
+        result = await Promise.race([evalPromise, timeoutPromise]);
+      } finally {
+        clearTimeout(timer);
+      }
+    } else {
+      result = await evalPromise;
+    }
     if (result.exceptionDetails) {
       const msg = result.exceptionDetails.exception?.description
         || result.exceptionDetails.text
         || 'evaluation error';
-      throw new Error(`worker ${this.id}: ${msg}`);
+      throw new ClassifiedError(CATEGORIES.API_UNEXPECTED, `worker ${this.id}: ${msg}`);
     }
     return result.result?.value;
   }
@@ -98,7 +154,10 @@ class SweepWorker {
       if (ready) return true;
       await new Promise((r) => setTimeout(r, 500));
     }
-    throw new Error(`worker ${this.id}: chart API not ready after ${timeoutMs}ms`);
+    throw new ClassifiedError(
+      CATEGORIES.CHART_LOADING,
+      `worker ${this.id}: chart API not ready after ${timeoutMs}ms`,
+    );
   }
 
   /**
@@ -106,6 +165,12 @@ class SweepWorker {
    * replaying the captured metaInfo. Mirrors injectPublishedStudy in
    * state.js but runs against this worker's own CDP session so the
    * helper's singleton-evaluate isn't reused.
+   *
+   * Returns { success, method, pre_strategy_ids } — `pre_strategy_ids` is
+   * the set of strategy entity_ids that existed BEFORE injection. The
+   * caller passes that into resolveStrategyEntityId so it can find the
+   * newly-injected source (not a pre-existing strategy from the user's
+   * default layout — that was the binding bug we previously hit).
    */
   async injectStrategy({ metaInfo, inputs }) {
     const metaJson = JSON.stringify(metaInfo);
@@ -116,29 +181,64 @@ class SweepWorker {
           var cw = window.TradingViewApi._activeChartWidgetWV.value();
           var meta = ${metaJson};
           var inputs = ${inputsJson};
-          var sources = function() { try { return cw._chartWidget.model().model().dataSources().length; } catch(e) { return 0; } };
-          var before = sources();
+          var sources = function() { try { return cw._chartWidget.model().model().dataSources(); } catch(e) { return []; } };
+          var strategyIds = function() {
+            var ids = [];
+            var srcs = sources();
+            for (var i = 0; i < srcs.length; i++) {
+              if (typeof srcs[i].reportData === 'function') {
+                try {
+                  var s = srcs[i];
+                  var sid = typeof s.id === 'function' ? s.id() : s._id;
+                  if (sid) ids.push(String(sid));
+                } catch(e) {}
+              }
+            }
+            return ids;
+          };
+          var pre_strategy_ids = strategyIds();
+          var beforeLen = sources().length;
           var settle = function(ms) { return new Promise(function(r){ setTimeout(r, ms); }); };
-          try { await cw.createStudy(meta); await settle(800); if (sources() > before) return { success: true, method: 'createStudy' }; } catch(e) {}
-          try { var ret = cw._chartWidget.insertStudy(meta, []); if (ret && typeof ret.then === 'function') await ret; await settle(800); if (sources() > before) return { success: true, method: 'insertStudy' }; } catch(e) {}
-          try { cw.insertStudyWithoutCheck(meta, inputs, false, [], null); await settle(800); if (sources() > before) return { success: true, method: 'insertStudyWithoutCheck' }; } catch(e) {}
-          return { success: false, sources_before: before, sources_after: sources() };
+          try { await cw.createStudy(meta); await settle(800); if (sources().length > beforeLen) return { success: true, method: 'createStudy', pre_strategy_ids: pre_strategy_ids }; } catch(e) {}
+          try { var ret = cw._chartWidget.insertStudy(meta, []); if (ret && typeof ret.then === 'function') await ret; await settle(800); if (sources().length > beforeLen) return { success: true, method: 'insertStudy', pre_strategy_ids: pre_strategy_ids }; } catch(e) {}
+          try { cw.insertStudyWithoutCheck(meta, inputs, false, [], null); await settle(800); if (sources().length > beforeLen) return { success: true, method: 'insertStudyWithoutCheck', pre_strategy_ids: pre_strategy_ids }; } catch(e) {}
+          return { success: false, sources_before: beforeLen, sources_after: sources().length, pre_strategy_ids: pre_strategy_ids };
         } catch(e) { return { success: false, reason: 'eval_error', error: e.message }; }
       })()
     `, { awaitPromise: true });
     return result || { success: false, reason: 'no_result' };
   }
 
-  /** Find this worker's strategy entity_id (the only source with reportData). */
-  async resolveStrategyEntityId() {
+  /**
+   * Find this worker's NEWLY-injected strategy entity_id. `exclude` is the
+   * set of strategy ids that existed before injection — pass the
+   * `pre_strategy_ids` returned by injectStrategy. Without that exclusion,
+   * a default-layout chart with a pre-existing strategy would have this
+   * function bind to the OLD strategy and every sweep metric would come
+   * from the wrong source.
+   */
+  async resolveStrategyEntityId(exclude = []) {
+    const excludeJson = JSON.stringify(exclude);
     return await this.evaluate(`
       (function() {
         try {
+          var exclude = ${excludeJson};
+          var seen = {};
+          for (var i = 0; i < exclude.length; i++) seen[String(exclude[i])] = true;
           var sources = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget.model().model().dataSources();
           for (var i = 0; i < sources.length; i++) {
             if (typeof sources[i].reportData === 'function') {
               var s = sources[i];
-              return (typeof s.id === 'function' ? s.id() : s._id) || null;
+              var sid = (typeof s.id === 'function' ? s.id() : s._id) || null;
+              if (sid && !seen[String(sid)]) return sid;
+            }
+          }
+          // Fall back to first strategy if nothing was newly added (the
+          // injection may have replaced an existing strategy in place).
+          for (var j = 0; j < sources.length; j++) {
+            if (typeof sources[j].reportData === 'function') {
+              var s2 = sources[j];
+              return (typeof s2.id === 'function' ? s2.id() : s2._id) || null;
             }
           }
           return null;
@@ -172,7 +272,12 @@ class SweepWorker {
       })()
     `;
     const result = await this.evaluate(expr);
-    if (!result?.ok) throw new Error(`setInputs failed: ${JSON.stringify(result)}`);
+    if (!result?.ok) {
+      throw new ClassifiedError(
+        CATEGORIES.API_UNEXPECTED,
+        `setInputs failed: ${JSON.stringify(result)}`,
+      );
+    }
   }
 
   async readMetrics() {
@@ -257,6 +362,7 @@ export async function runCombosParallel({
   base_inputs = {},
   parallelism = 3,
   per_combo_settle_ms = 1500,
+  timeout_per_combo_ms = DEFAULT_TIMEOUT_PER_COMBO_MS,
 }) {
   if (!Array.isArray(combos) || combos.length === 0) {
     return { results: [], cleanup_warnings: [] };
@@ -265,17 +371,24 @@ export async function runCombosParallel({
   const workers = [];
   const cleanup_warnings = [];
 
-  // Spawn N tabs. If any fails, abort and clean up the rest.
+  // Spawn N tabs. If any fails, abort and clean up the rest. Push the
+  // worker BEFORE connect() so a failed connect still leaves the spawned
+  // tab tracked in `workers` and gets closed by the cleanup loop —
+  // otherwise every connect-failure orphans a Chrome tab.
   try {
     for (let i = 0; i < N; i++) {
       const target = await _spawnTab();
       const w = new SweepWorker({ id: i, target_id: target.id, ws_url: target.webSocketDebuggerUrl });
-      await w.connect();
       workers.push(w);
+      await w.connect();
     }
   } catch (err) {
     for (const w of workers) await w.destroy();
-    throw new Error(`Failed to spawn worker pool (${workers.length}/${N}): ${err.message}`);
+    throw new ClassifiedError(
+      CATEGORIES.API_UNEXPECTED,
+      `Failed to spawn worker pool (${workers.length}/${N}): ${err.message}`,
+      { cause: err },
+    );
   }
 
   // Prep each worker: wait for chart API, inject strategy, resolve entity_id.
@@ -292,7 +405,9 @@ export async function runCombosParallel({
         w.error = `inject failed: ${JSON.stringify(inj)}`;
         return;
       }
-      const eid = await w.resolveStrategyEntityId();
+      // Pass the pre-existing strategy ids so the resolver doesn't bind to
+      // a stale strategy from the default layout.
+      const eid = await w.resolveStrategyEntityId(inj.pre_strategy_ids || []);
       if (!eid) { w.error = 'no entity_id after inject'; return; }
       w.entity_id = eid;
     } catch (err) {
@@ -304,7 +419,10 @@ export async function runCombosParallel({
   if (healthy.length === 0) {
     const reasons = workers.map((w) => `worker ${w.id}: ${w.error}`);
     for (const w of workers) await w.destroy();
-    throw new Error(`All ${N} workers failed setup. ${reasons.join(' | ')}`);
+    throw new ClassifiedError(
+      CATEGORIES.API_UNEXPECTED,
+      `All ${N} workers failed setup. ${reasons.join(' | ')}`,
+    );
   }
 
   // Distribute combos round-robin across healthy workers.
@@ -313,23 +431,56 @@ export async function runCombosParallel({
     queues[i % healthy.length].push(combos[i]);
   }
 
+  // A Ctrl-C / kill mid-sweep skips the finally below and orphans 3-6
+  // TradingView tabs. Register best-effort signal handlers that fire tab-close
+  // requests for every spawned worker. These are fire-and-forget — the process
+  // may exit before the async fetch lands (telemetry.js hard-exits on SIGINT),
+  // but on SIGTERM and slower exits they reclaim the tabs. prependListener so
+  // we at least dispatch the closes ahead of any exit handler. Removed in the
+  // finally so a completed sweep doesn't leak listeners across runs.
+  const _onTerminate = () => { for (const w of workers) { try { _closeTab(w.target_id); } catch {} } };
+  process.prependListener('SIGINT', _onTerminate);
+  process.prependListener('SIGTERM', _onTerminate);
+
   // Each worker drains its queue serially.
   const results = [];
-  await Promise.all(healthy.map(async (w, qIdx) => {
-    for (const combo of queues[qIdx]) {
-      const r = await w.runCombo({ combo, entityId: w.entity_id, settleMs: per_combo_settle_ms });
-      results.push(r);
+  try {
+    await Promise.all(healthy.map(async (w, qIdx) => {
+      for (const combo of queues[qIdx]) {
+        let r;
+        try {
+          // Per-combo backstop: a wedged combo must not stall this worker's
+          // whole queue (and the outer Promise.all) indefinitely. runCombo
+          // catches its own errors, so this race only fires on a genuine hang
+          // that escapes the per-evaluate timeout.
+          r = await _withTimeout(
+            w.runCombo({ combo, entityId: w.entity_id, settleMs: per_combo_settle_ms }),
+            timeout_per_combo_ms,
+            `worker ${w.id} ${combo.symbol}/${combo.timeframe}`,
+          );
+        } catch (err) {
+          r = {
+            symbol: combo.symbol,
+            timeframe: combo.timeframe,
+            inputs: combo.inputs,
+            error: err.message,
+            worker_id: w.id,
+          };
+        }
+        results.push(r);
+      }
+    }));
+  } finally {
+    // Cleanup MUST run whether the drain resolved or threw — a rejected drain
+    // would otherwise leave every worker tab open (the orphaned-tab leak).
+    process.removeListener('SIGINT', _onTerminate);
+    process.removeListener('SIGTERM', _onTerminate);
+    for (const w of workers) {
+      if (w.error) cleanup_warnings.push({ stage: 'worker_setup', worker_id: w.id, reason: w.error });
     }
-  }));
-
-  // Note any failed-setup workers.
-  for (const w of workers) {
-    if (w.error) cleanup_warnings.push({ stage: 'worker_setup', worker_id: w.id, reason: w.error });
-  }
-
-  // Cleanup: close each worker tab.
-  for (const w of workers) {
-    try { await w.destroy(); } catch (err) { cleanup_warnings.push({ stage: 'worker_destroy', worker_id: w.id, error: err.message }); }
+    for (const w of workers) {
+      try { await w.destroy(); } catch (err) { cleanup_warnings.push({ stage: 'worker_destroy', worker_id: w.id, error: err.message }); }
+    }
   }
 
   return {

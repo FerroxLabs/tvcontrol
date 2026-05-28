@@ -119,7 +119,7 @@ describe('MCP tool registration — integration', () => {
     }
   });
 
-  it('strictResolve catches typoed _deps keys (W4-L2)', async () => {
+  it('strictResolve catches typoed _deps keys', async () => {
     // Public-API entry points (state, sweep, vision, data) strict-check
     // their _deps. A typo'd key should throw a TypeError rather than
     // silently fall through to the real CDP function.
@@ -142,7 +142,27 @@ describe('MCP tool registration — integration', () => {
     );
   });
 
-  it('no raw "throw new Error" left in src/core/ — all errors must be ClassifiedError (W4-L3)', async () => {
+  it('ui_evaluate is gated behind TV_MCP_ADVANCED (arbitrary-JS RCE surface)', () => {
+    const prev = process.env.TV_MCP_ADVANCED;
+    try {
+      delete process.env.TV_MCP_ADVANCED;
+      const off = mockServer();
+      registerUiTools(off);
+      assert.ok(!off._tools.some(t => t.name === 'ui_evaluate'),
+        'ui_evaluate must NOT be registered without TV_MCP_ADVANCED=1');
+
+      process.env.TV_MCP_ADVANCED = '1';
+      const on = mockServer();
+      registerUiTools(on);
+      assert.ok(on._tools.some(t => t.name === 'ui_evaluate'),
+        'ui_evaluate must be registered when TV_MCP_ADVANCED=1');
+    } finally {
+      if (prev === undefined) delete process.env.TV_MCP_ADVANCED;
+      else process.env.TV_MCP_ADVANCED = prev;
+    }
+  });
+
+  it('no raw "throw new Error" left in src/core/ — all errors must be ClassifiedError', async () => {
     // CI guard: every error thrown from src/core/ must carry a category +
     // hint so MCP clients can branch + display remediation steps. Any new
     // raw `throw new Error(...)` in src/core/*.js will fail this test.

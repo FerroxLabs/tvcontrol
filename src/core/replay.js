@@ -50,8 +50,15 @@ export async function start({ date, _deps } = {}) {
   }
 
   if (!started) {
-    try { await evaluate(`${rp}.stopReplay()`); } catch {}
-    throw new ClassifiedError(CATEGORIES.API_UNEXPECTED, 'Replay failed to start. The selected date may not have data for this timeframe.', { hint: 'Try a more recent date or a higher timeframe (e.g., Daily).' });
+    // Capture (don't swallow) the cleanup failure so a half-entered replay
+    // that also failed to stop carries the reason as the error's cause.
+    let cleanupErr;
+    try { await evaluate(`${rp}.stopReplay()`); } catch (e) { cleanupErr = e; }
+    throw new ClassifiedError(
+      CATEGORIES.API_UNEXPECTED,
+      'Replay failed to start. The selected date may not have data for this timeframe.',
+      { hint: 'Try a more recent date or a higher timeframe (e.g., Daily).', ...(cleanupErr ? { cause: cleanupErr } : {}) },
+    );
   }
 
   return { success: true, replay_started: true, date: date || '(first available)', current_date: currentDate };
@@ -67,12 +74,35 @@ export async function step({ _deps } = {}) {
   // doStep() is async internally — currentDate takes ~500ms to update.
   // Poll until it changes or timeout after 3s.
   let currentDate = before;
+  let advanced = false;
   for (let i = 0; i < 12; i++) {
     await new Promise(r => setTimeout(r, 250));
     currentDate = await evaluate(wv(`${rp}.currentDate()`));
-    if (currentDate !== before) break;
+    // Type guard: currentDate can transiently read back null/undefined; only a
+    // real, different value counts as advanced — otherwise we'd "advance" to
+    // undefined and return it as the new date.
+    if (currentDate != null && currentDate !== before) { advanced = true; break; }
   }
-  return { success: true, action: 'step', current_date: currentDate };
+  if (!advanced) {
+    // Didn't advance within the poll window — likely end-of-data. Best-effort
+    // confirm via the replay API so the caller learns stepping is exhausted.
+    // Guarded: returns null if the method isn't present on this TV build, in
+    // which case we simply omit at_end (only runs on the already-slow path).
+    const ended = await evaluate(`
+      (function(){
+        try {
+          var r = ${rp};
+          function u(v){ return (v && typeof v === 'object' && typeof v.value === 'function') ? v.value() : v; }
+          if (typeof r.isReplayFinished === 'function') return !!u(r.isReplayFinished());
+          if (typeof r.isReplayEnded === 'function') return !!u(r.isReplayEnded());
+          if (typeof r.isLastBar === 'function') return !!u(r.isLastBar());
+          return null;
+        } catch(e){ return null; }
+      })()
+    `);
+    return { success: true, action: 'step', current_date: currentDate, advanced: false, ...(ended === true ? { at_end: true } : {}) };
+  }
+  return { success: true, action: 'step', current_date: currentDate, advanced: true };
 }
 
 export async function autoplay({ speed, _deps } = {}) {

@@ -1,9 +1,9 @@
 /**
  * Shared dependency-injection helpers for src/core/* modules.
  *
- * Background (W4-L5): every core module had its own `_resolve(deps)` helper
- * doing `deps?.x || _x` lookups. Cosmetic duplication, but more importantly
- * a debugging trap (W4-L2): a typo'd key like `_deps:{ stSymbol: ... }` was
+ * Background: every core module had its own `_resolve(deps)` helper doing
+ * `deps?.x || _x` lookups. Cosmetic duplication, but more importantly a
+ * debugging trap: a typo'd key like `_deps:{ stSymbol: ... }` was
  * silently swapped for the production CDP function, sending real CDP calls
  * from inside what the test author thought was a unit test.
  *

@@ -41,9 +41,9 @@ function printCommandHelp(name, cmd) {
   if (cmd.subcommands) {
     console.log(`Usage: tv ${name} <subcommand> [options]\n`);
     console.log('Subcommands:');
-    // Auto-pad to longest subcommand name + 2 (W4-L1). Was hardcoded
-    // padEnd(12), so subcommand names ≥ 11 chars (e.g., "delete_by_id")
-    // collided with their description text.
+    // Auto-pad to longest subcommand name + 2. Was hardcoded padEnd(12), so
+    // subcommand names ≥ 11 chars (e.g., "delete_by_id") collided with their
+    // description text.
     const subWidth = Math.max(12, ...[...cmd.subcommands.keys()].map(k => k.length + 2));
     for (const [sub, subConf] of cmd.subcommands) {
       console.log(`  ${sub.padEnd(subWidth)}${subConf.description}`);
@@ -162,7 +162,7 @@ function handleError(err) {
   console.error(JSON.stringify(payload, null, 2));
   // Prefer the structured category for exit-code routing — it's stable across
   // error-message rephrasings. Fall back to regex match only for non-classified
-  // errors (legacy throw new Error sites). W4-M4.
+  // errors (legacy throw new Error sites).
   if (category && EXIT2_CATEGORIES.has(category)) {
     process.exit(2);
   }

@@ -4,9 +4,10 @@
  */
 import { evaluate as _evaluate, evaluateAsync as _evaluateAsync, getClient as _getClient, safeString } from '../connection.js';
 import { writeFileSync, readFileSync, mkdirSync, renameSync, existsSync } from 'node:fs';
-import { dirname, join, isAbsolute } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 import { ClassifiedError, CATEGORIES } from '../errors.js';
+import { parseJsonSafe } from './_json.js';
 
 function _resolve(deps) {
   return {
@@ -199,8 +200,16 @@ export async function add({ symbol, _deps }) {
   // Verify: at least one new symbol appeared, AND one of them resolves from
   // the user's input. TradingView expands bare tickers (AAPL → NASDAQ:AAPL),
   // so trust the diff rather than assuming the input string is what got stored.
-  const after = await _currentSymbolsSet(evaluate);
-  const added = [...after].filter((s) => !before.has(s));
+  // Poll (≤3s) instead of trusting a single fixed-delay snapshot — slow
+  // autocomplete / network latency previously produced a false SYMBOL_UNKNOWN
+  // even when the add succeeded a beat later.
+  let added = [];
+  for (let attempt = 0; attempt < 12; attempt++) {
+    const after = await _currentSymbolsSet(evaluate);
+    added = [...after].filter((s) => !before.has(s));
+    if (added.length > 0) break;
+    await new Promise(r => setTimeout(r, 250));
+  }
   if (added.length === 0) {
     throw new ClassifiedError(
       CATEGORIES.SYMBOL_UNKNOWN,
@@ -301,12 +310,33 @@ export async function remove({ symbol, _deps }) {
   return { success: true, action: 'removed', requested_symbol: symbol, stored_symbol: resolved, method };
 }
 
+function _isUnder(child, parent) {
+  if (!parent) return false;
+  if (child === parent) return true;
+  return child.startsWith(parent.endsWith(sep) ? parent : parent + sep);
+}
+
+/**
+ * Allowlist check for export/import paths. Three fixes vs the original:
+ *   1. `path.resolve` first so relative paths (`../../foo`) are anchored to
+ *      cwd before the check — was the bypass surface in the original.
+ *   2. Use `sep`-boundary prefix match so `/Users/sean.evil/foo` does NOT
+ *      match home `/Users/sean` (substring-prefix flaw).
+ *   3. Reject null bytes (Node's fs throws on them anyway, but rejecting
+ *      early gives a clean ClassifiedError).
+ * The original `..` substring check is no longer needed — `path.resolve`
+ * normalises any traversal away, and any path that resolves outside the
+ * allowlist is rejected on its merits.
+ */
 function _isPathAllowed(filePath) {
-  if (filePath.includes('..')) return false;
-  if (!isAbsolute(filePath)) return true; // relative paths are fine — will be resolved later
+  if (typeof filePath !== 'string' || filePath.length === 0 || filePath.includes('\0')) return false;
+  const resolved = resolve(filePath);
   const home = homedir();
   const tmp = tmpdir();
-  return filePath.startsWith(home) || filePath.startsWith('/tmp') || filePath.startsWith('/var/folders') || filePath.startsWith(tmp);
+  return _isUnder(resolved, home)
+    || _isUnder(resolved, '/tmp')
+    || _isUnder(resolved, '/var/folders')
+    || _isUnder(resolved, tmp);
 }
 
 export async function exportTo({ file_path, _deps } = {}) {
@@ -330,7 +360,10 @@ export async function exportTo({ file_path, _deps } = {}) {
   const exported_at = new Date().toISOString();
   const payload = { schema_version: 1, exported_at, symbols: result.symbols };
 
-  const tmp = `${filePath}.tmp`;
+  // Unique tmp suffix prevents concurrent exports from overwriting each
+  // other's sidecar file — was a known race on the hardcoded `.tmp` name.
+  const rand = Math.random().toString(36).slice(2, 8);
+  const tmp = `${filePath}.${process.pid}.${rand}.tmp`;
   writeFileSync(tmp, JSON.stringify(payload, null, 2), 'utf8');
   renameSync(tmp, filePath);
 
@@ -338,13 +371,22 @@ export async function exportTo({ file_path, _deps } = {}) {
 }
 
 export async function importFrom({ file_path, mode = 'merge', dry_run = false, _deps } = {}) {
+  // Mirror the allowlist exportTo enforces — without this gate, importFrom
+  // could read arbitrary JSON from anywhere on the filesystem (e.g.
+  // ~/.ssh/-shaped files, /etc/*) and reflect contents back to the caller.
+  if (!_isPathAllowed(file_path)) {
+    throw new ClassifiedError(
+      CATEGORIES.API_UNEXPECTED,
+      `Path rejected: ${file_path}. Paths must resolve under home directory or system tmp.`,
+    );
+  }
   if (!existsSync(file_path)) {
     throw new ClassifiedError(CATEGORIES.API_UNEXPECTED, `File not found: ${file_path}`);
   }
 
   let parsed;
   try {
-    parsed = JSON.parse(readFileSync(file_path, 'utf8'));
+    parsed = parseJsonSafe(readFileSync(file_path, 'utf8'));
   } catch {
     throw new ClassifiedError(CATEGORIES.API_UNEXPECTED, `Failed to parse JSON from: ${file_path}`);
   }

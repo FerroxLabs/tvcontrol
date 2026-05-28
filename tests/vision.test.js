@@ -76,7 +76,7 @@ describe('chartVisionRead()', () => {
     assert.ok(!('ohlcv_summary' in result));
   });
 
-  it('2b. captureScreenshot is NOT called when "image" excluded from include (audit lens C2)', async () => {
+  it('2b. captureScreenshot is NOT called when "image" excluded from include', async () => {
     let captureCalls = 0;
     const { _deps } = makeDeps();
     _deps.captureScreenshot = async () => { captureCalls++; return { success: true, file_path: '/tmp/never' }; };
@@ -122,7 +122,7 @@ describe('chartVisionRead()', () => {
     assert.ok('state' in result);
   });
 
-  it('5b. failed section writes structured stub to result[section] (W4-H2)', async () => {
+  it('5b. failed section writes structured stub to result[section]', async () => {
     // Use a ClassifiedError-shaped object to verify category propagation.
     class ClassErr extends Error { constructor(m, cat, hint) { super(m); this.category = cat; this.hint = hint; } }
     const { _deps } = makeDeps({

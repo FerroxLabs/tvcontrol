@@ -460,7 +460,7 @@ this_function_does_not_exist()`;
 });
 
 // ════════════════════════════════════════════════════════
-// New checks — W3.3
+// New checks
 // ════════════════════════════════════════════════════════
 
 describe('Check 1: security lookahead repaint', () => {

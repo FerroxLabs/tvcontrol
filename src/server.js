@@ -1,5 +1,6 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { disconnect } from './connection.js';
 import { instrument } from './tools/_format.js';
 import { registerHealthTools } from './tools/health.js';
 import { registerChartTools } from './tools/chart.js';
@@ -62,6 +63,8 @@ Launch: tv_launch → auto-detect and start TradingView with CDP on any platform
 Panes: pane_list, pane_set_layout (s, 2h, 2v, 4, 6, 8), pane_focus, pane_set_symbol
 Tabs: tab_list, tab_new, tab_close, tab_switch
 
+Advanced (opt-in): ui_evaluate (run arbitrary page JS) is GATED behind the TV_MCP_ADVANCED=1 env var and is NOT registered by default. Of the 88-tool catalog, 87 are available unless that flag is set.
+
 CONTEXT MANAGEMENT:
 - ALWAYS use summary=true on data_get_ohlcv
 - ALWAYS use study_filter on pine tools when you know which indicator you want
@@ -73,8 +76,15 @@ CONTEXT MANAGEMENT:
 
 // Monkey-patch server.tool() to auto-wrap every handler with telemetry.
 // This means instrument() fires for all tools without touching each tool file.
+// Use rest args so we survive both the 4-arg form (name, desc, schema, handler)
+// and the SDK's 3-arg form (name, schema, handler) — the latter would
+// previously crash startup with `handler is undefined`.
 const _origTool = server.tool.bind(server);
-server.tool = (name, desc, schema, handler) => _origTool(name, desc, schema, instrument(name, handler));
+server.tool = (name, ...rest) => {
+  const handler = rest[rest.length - 1];
+  rest[rest.length - 1] = instrument(name, handler);
+  return _origTool(name, ...rest);
+};
 
 // Register all tool groups
 registerHealthTools(server);
@@ -96,6 +106,22 @@ registerVisionTools(server);
 // Startup notice (stderr so it doesn't interfere with MCP stdio protocol)
 process.stderr.write('⚠  tvcontrol  |  Unofficial tool. Not affiliated with TradingView Inc. or Anthropic, PBC.\n');
 process.stderr.write('   Ensure your usage complies with TradingView\'s Terms of Use.\n\n');
+
+// Graceful shutdown: close the CDP WebSocket so TradingView's DevTools server
+// releases the attached target session instead of leaking it on every MCP-host
+// restart (sessions accumulate until Electron refuses new DevTools clients). A
+// bare SIGTERM listener also suppresses Node's default-terminate, so without
+// this exit the process would hang on `kill`. telemetry.js owns its own flush
+// handlers; these run alongside to add the disconnect + a definitive exit.
+let _shuttingDown = false;
+async function _gracefulShutdown(code) {
+  if (_shuttingDown) return;
+  _shuttingDown = true;
+  try { await disconnect(); } catch { /* best-effort — exiting regardless */ }
+  process.exit(code);
+}
+process.on('SIGTERM', () => { _gracefulShutdown(0); });
+process.on('SIGINT', () => { _gracefulShutdown(130); });
 
 // Start stdio transport
 const transport = new StdioServerTransport();

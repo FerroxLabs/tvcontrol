@@ -12,6 +12,7 @@ import * as chart from './chart.js';
 import * as pane from './pane.js';
 import * as drawing from './drawing.js';
 import { strictResolve } from './_resolve.js';
+import { parseJsonSafe } from './_json.js';
 
 const _STATE_DEPS = new Set([
   'evaluate', 'evaluateAsync', 'waitForChartReady',
@@ -43,8 +44,19 @@ function _validateName(name) {
   if (name.includes('/') || name.includes('\\')) {
     throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'name must not contain "/" or "\\"');
   }
-  if (name.includes('..')) {
-    throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'name must not contain ".."');
+  if (name.includes('\0')) {
+    throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'name must not contain null bytes');
+  }
+  // Reject any name that STARTS with `..` (catches `..`, `..evil`, `...foo`
+  // — defense-in-depth even though separators are already blocked). Names
+  // with `..` in the middle (`my..backup`) are fine — they can't form a
+  // traversal once `/` and `\` are rejected above. The old
+  // `includes('..')` was too broad and rejected legitimate snapshot names.
+  if (name.startsWith('..')) {
+    throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'name must not start with ".."');
+  }
+  if (name === '.') {
+    throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'name must not be "."');
   }
 }
 
@@ -71,15 +83,25 @@ export async function snapshot({ name, overwrite = false, _deps, _snapshots_dir 
 
   const { evaluate, paneList: _paneListFn, drawingList: _drawingListFn, drawingProps: _drawingPropsFn } = _resolve(_deps);
 
+  // Collected across every capture stage. Hoisted so the pane/drawing/visible
+  // -range catches can record their failures here instead of silently
+  // defaulting to empty (the old behavior produced "successful" snapshots
+  // missing chunks of state).
+  const skipped_at_snapshot = [];
+
   // Fetch chart state
   const chartState = await chart.getState({ _deps });
 
   // Fetch pane list (use injected fn if provided, else real pane.list())
+  // Errors must surface — silent default-to-empty meant a broken pane API
+  // produced a "successful" snapshot missing the entire multi-pane layout.
   let paneList = [];
   try {
     const paneResult = _paneListFn ? await _paneListFn() : await pane.list();
     paneList = paneResult.panes || [];
-  } catch (_) {}
+  } catch (err) {
+    skipped_at_snapshot.push({ field: 'panes', reason: err.message });
+  }
 
   // Fetch drawings with properties (use injected fns if provided)
   let drawingsData = [];
@@ -96,9 +118,13 @@ export async function snapshot({ name, overwrite = false, _deps, _snapshots_dir 
           overrides: props.properties || {},
           text: '',
         });
-      } catch (_) {}
+      } catch (err) {
+        skipped_at_snapshot.push({ field: 'drawing', id: shape.id, name: shape.name, reason: err.message });
+      }
     }
-  } catch (_) {}
+  } catch (err) {
+    skipped_at_snapshot.push({ field: 'drawings_enumerate', reason: err.message });
+  }
 
   // Fetch visible range
   let visibleRange = null;
@@ -113,13 +139,15 @@ export async function snapshot({ name, overwrite = false, _deps, _snapshots_dir 
       })()
     `);
     if (vr && vr.from != null && vr.to != null) visibleRange = vr;
-  } catch (_) {}
+  } catch (err) {
+    skipped_at_snapshot.push({ field: 'visible_range', reason: err.message });
+  }
 
   // Fetch all study inputs in a single evaluate (avoids N+1 CDP roundtrips)
   const studies = [];
-  const skipped_at_snapshot = [];
 
   let allStudiesData = [];
+  let _studiesCaptureFailed = false;
   try {
     allStudiesData = await evaluate(`
       (function() {
@@ -225,7 +253,14 @@ export async function snapshot({ name, overwrite = false, _deps, _snapshots_dir 
         });
       })()
     `);
-  } catch (_) {}
+  } catch (err) {
+    // Distinguish "chart genuinely has zero studies" from "study evaluate
+    // threw" — the old silent default-to-[] produced snapshots that looked
+    // valid but restored to an empty chart. Track the failure so the caller
+    // sees data was lost.
+    _studiesCaptureFailed = true;
+    skipped_at_snapshot.push({ field: 'studies_enumerate', reason: err.message });
+  }
 
   for (const s of (allStudiesData || [])) {
     const entry = {
@@ -292,7 +327,15 @@ export async function snapshot({ name, overwrite = false, _deps, _snapshots_dir 
   renameSync(tmp, filePath);
 
   return {
-    success: true,
+    // success=false when the studies capture threw outright — the snapshot
+    // is still written (with whatever was salvaged) but the caller needs to
+    // know it's degraded. Without this, a study-API regression in TV would
+    // produce snapshots that look fine and restore to nothing.
+    success: !_studiesCaptureFailed,
+    ...(_studiesCaptureFailed && {
+      degraded: true,
+      hint: 'Study capture failed — snapshot was written but contains 0 studies. Inspect skipped_at_snapshot for the underlying error.',
+    }),
     name,
     file_path: filePath,
     schema_version: 1,
@@ -319,7 +362,7 @@ export async function restore({ name, _deps, _snapshots_dir } = {}) {
 
   let snap;
   try {
-    snap = JSON.parse(readFileSync(filePath, 'utf8'));
+    snap = parseJsonSafe(readFileSync(filePath, 'utf8'));
   } catch {
     throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, `Failed to parse snapshot file: ${filePath}`);
   }
@@ -335,9 +378,9 @@ export async function restore({ name, _deps, _snapshots_dir } = {}) {
   const skipped = [];
 
   // 0. Clear existing studies and drawings before re-applying.
-  //    All removals are batched into ONE evaluate call (W4-M1) — was N+1
-  //    CDP roundtrips, now 1. Each per-study failure still propagates into
-  //    skipped[] so the caller sees state contamination (W3.5 lens B).
+  //    All removals are batched into ONE evaluate call — was N+1 CDP
+  //    roundtrips, now 1. Each per-study failure still propagates into
+  //    skipped[] so the caller sees any state contamination.
   try {
     const currentState = await chart.getState({ _deps });
     const studiesToClear = currentState.studies || [];
@@ -574,11 +617,12 @@ export function list({ _snapshots_dir } = {}) {
 
   const files = readdirSync(dir).filter(f => f.endsWith('.json'));
   const snapshots = [];
+  const corrupt = [];
 
   for (const file of files) {
     try {
       const raw = readFileSync(join(dir, file), 'utf8');
-      const data = JSON.parse(raw);
+      const data = parseJsonSafe(raw);
       const pane0 = data.panes && data.panes[0];
       snapshots.push({
         name: data.name || file.replace(/\.json$/, ''),
@@ -587,7 +631,12 @@ export function list({ _snapshots_dir } = {}) {
         resolution: pane0 ? pane0.resolution : null,
         studies_count: Array.isArray(data.studies) ? data.studies.length : 0,
       });
-    } catch (_) {}
+    } catch (err) {
+      // Surface unparseable files instead of silently hiding them — the user
+      // needs a way to see and remove corrupt snapshots that fell off the
+      // listing (e.g., an interrupted tmp->rename leaving a partial file).
+      corrupt.push({ file, error: err.message });
+    }
   }
 
   snapshots.sort((a, b) => {
@@ -596,7 +645,12 @@ export function list({ _snapshots_dir } = {}) {
     return b.captured_at.localeCompare(a.captured_at);
   });
 
-  return { success: true, count: snapshots.length, snapshots };
+  return {
+    success: true,
+    count: snapshots.length,
+    snapshots,
+    ...(corrupt.length > 0 && { corrupt }),
+  };
 }
 
 /**
@@ -634,6 +688,12 @@ export async function injectPublishedStudy({ metaInfo, inputs = {}, _deps } = {}
   }
   const { evaluate, evaluateAsync } = _resolve(_deps);
 
+  // TRIPWIRE: metaInfo is interpolated into the in-page script below as a JSON
+  // literal. JSON.stringify is the injection boundary — it produces a valid JS
+  // object literal with all strings safely quoted/escaped. Do NOT "simplify"
+  // this to template-string concatenation or any non-JSON serialization: a
+  // study name / field containing quotes or `);` would then break out into
+  // arbitrary in-page JS. Keep the boundary as JSON — do not "simplify."
   const metaJson = JSON.stringify(metaInfo);
   const inputsJson = JSON.stringify(inputs);
 

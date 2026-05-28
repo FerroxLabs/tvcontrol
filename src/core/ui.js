@@ -5,21 +5,39 @@ import { evaluate, evaluateAsync, getClient } from '../connection.js';
 import { ClassifiedError, CATEGORIES } from '../errors.js';
 
 export async function click({ by, value }) {
-  const escaped = JSON.stringify(value);
+  // Selector strings used to be assembled in-page via string concat with
+  // hand-rolled quote escaping (`value.replace(/"/g, '\\\\"')`), which
+  // broke on values containing backslashes or control chars and could
+  // throw a DOM SyntaxError that bypassed the intended ClassifiedError.
+  // Use attribute-equality filtering on a broad querySelectorAll instead
+  // — the value never touches the CSS parser.
   const result = await evaluate(`
     (function() {
       var by = ${JSON.stringify(by)};
-      var value = ${escaped};
+      var value = ${JSON.stringify(value)};
       var el = null;
-      if (by === 'aria-label') el = document.querySelector('[aria-label="' + value.replace(/"/g, '\\\\"') + '"]');
-      else if (by === 'data-name') el = document.querySelector('[data-name="' + value.replace(/"/g, '\\\\"') + '"]');
-      else if (by === 'text') {
-        var candidates = document.querySelectorAll('button, a, [role="button"], [role="menuitem"], [role="tab"]');
-        for (var i = 0; i < candidates.length; i++) {
-          var text = candidates[i].textContent.trim();
-          if (text === value || text.toLowerCase() === value.toLowerCase()) { el = candidates[i]; break; }
+      if (by === 'aria-label') {
+        var nodes = document.querySelectorAll('[aria-label]');
+        for (var i = 0; i < nodes.length; i++) {
+          if (nodes[i].getAttribute('aria-label') === value) { el = nodes[i]; break; }
         }
-      } else if (by === 'class-contains') el = document.querySelector('[class*="' + value.replace(/"/g, '\\\\"') + '"]');
+      } else if (by === 'data-name') {
+        var nodes2 = document.querySelectorAll('[data-name]');
+        for (var i2 = 0; i2 < nodes2.length; i2++) {
+          if (nodes2[i2].getAttribute('data-name') === value) { el = nodes2[i2]; break; }
+        }
+      } else if (by === 'text') {
+        var candidates = document.querySelectorAll('button, a, [role="button"], [role="menuitem"], [role="tab"]');
+        for (var i3 = 0; i3 < candidates.length; i3++) {
+          var text = candidates[i3].textContent.trim();
+          if (text === value || text.toLowerCase() === value.toLowerCase()) { el = candidates[i3]; break; }
+        }
+      } else if (by === 'class-contains') {
+        var allClass = document.querySelectorAll('[class]');
+        for (var i4 = 0; i4 < allClass.length; i4++) {
+          if ((allClass[i4].getAttribute('class') || '').indexOf(value) !== -1) { el = allClass[i4]; break; }
+        }
+      }
       if (!el) return { found: false };
       el.click();
       return { found: true, tag: el.tagName.toLowerCase(), text: (el.textContent || '').trim().substring(0, 80), aria_label: el.getAttribute('aria-label') || null, data_name: el.getAttribute('data-name') || null };
@@ -191,7 +209,16 @@ export async function keyboard({ key, modifiers }) {
     'PageUp': { code: 'PageUp', vk: 33 }, 'PageDown': { code: 'PageDown', vk: 34 },
     'F1': { code: 'F1', vk: 112 }, 'F2': { code: 'F2', vk: 113 }, 'F5': { code: 'F5', vk: 116 },
   };
-  const mapped = keyMap[key] || { code: 'Key' + key.toUpperCase(), vk: key.toUpperCase().charCodeAt(0) };
+  // Fallback for single-character keys: digits use `Digit<N>`, letters use
+  // `Key<L>`. The old code emitted `Key1`/`Key0` for digits which CDP does
+  // not recognise — number keys would silently no-op.
+  function _fallbackKey(k) {
+    if (typeof k !== 'string' || k.length !== 1) return { code: 'Key' + String(k).toUpperCase(), vk: String(k).toUpperCase().charCodeAt(0) };
+    if (/[0-9]/.test(k)) return { code: 'Digit' + k, vk: k.charCodeAt(0) };
+    if (/[a-zA-Z]/.test(k)) return { code: 'Key' + k.toUpperCase(), vk: k.toUpperCase().charCodeAt(0) };
+    return { code: 'Key' + k.toUpperCase(), vk: k.charCodeAt(0) };
+  }
+  const mapped = keyMap[key] || _fallbackKey(key);
   await c.Input.dispatchKeyEvent({ type: 'keyDown', modifiers: mod, key, code: mapped.code, windowsVirtualKeyCode: mapped.vk });
   await c.Input.dispatchKeyEvent({ type: 'keyUp', key, code: mapped.code });
   return { success: true, key, modifiers: modifiers || [] };
@@ -204,20 +231,40 @@ export async function typeText({ text }) {
 }
 
 export async function hover({ by, value }) {
+  // Same attribute-equality-then-substring pattern as click() — no
+  // in-page CSS string concatenation.
   const coords = await evaluate(`
     (function() {
       var by = ${JSON.stringify(by)};
       var value = ${JSON.stringify(value)};
       var el = null;
       if (by === 'aria-label') {
-        el = document.querySelector('[aria-label="' + value.replace(/"/g, '\\\\"') + '"]');
-        if (!el) el = document.querySelector('[aria-label*="' + value.replace(/"/g, '\\\\"') + '"]');
-      }
-      else if (by === 'data-name') el = document.querySelector('[data-name="' + value.replace(/"/g, '\\\\"') + '"]');
-      else if (by === 'text') {
+        var nodes = document.querySelectorAll('[aria-label]');
+        for (var i = 0; i < nodes.length; i++) {
+          if (nodes[i].getAttribute('aria-label') === value) { el = nodes[i]; break; }
+        }
+        if (!el) {
+          for (var ii = 0; ii < nodes.length; ii++) {
+            if ((nodes[ii].getAttribute('aria-label') || '').indexOf(value) !== -1) { el = nodes[ii]; break; }
+          }
+        }
+      } else if (by === 'data-name') {
+        var nodes2 = document.querySelectorAll('[data-name]');
+        for (var i2 = 0; i2 < nodes2.length; i2++) {
+          if (nodes2[i2].getAttribute('data-name') === value) { el = nodes2[i2]; break; }
+        }
+      } else if (by === 'text') {
         var candidates = document.querySelectorAll('button, a, [role="button"], [role="menuitem"], [role="tab"], span, div');
-        for (var i = 0; i < candidates.length; i++) { var text = candidates[i].textContent.trim(); if (text === value || text.toLowerCase() === value.toLowerCase()) { el = candidates[i]; break; } }
-      } else if (by === 'class-contains') el = document.querySelector('[class*="' + value.replace(/"/g, '\\\\"') + '"]');
+        for (var i3 = 0; i3 < candidates.length; i3++) {
+          var text = candidates[i3].textContent.trim();
+          if (text === value || text.toLowerCase() === value.toLowerCase()) { el = candidates[i3]; break; }
+        }
+      } else if (by === 'class-contains') {
+        var allClass = document.querySelectorAll('[class]');
+        for (var i4 = 0; i4 < allClass.length; i4++) {
+          if ((allClass[i4].getAttribute('class') || '').indexOf(value) !== -1) { el = allClass[i4]; break; }
+        }
+      }
       if (!el) return null;
       var rect = el.getBoundingClientRect();
       return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2, tag: el.tagName.toLowerCase() };
@@ -250,7 +297,10 @@ export async function scroll({ direction, amount }) {
 export async function mouseClick({ x, y, button, double_click }) {
   const c = await getClient();
   const btn = button === 'right' ? 'right' : button === 'middle' ? 'middle' : 'left';
-  const btnNum = btn === 'right' ? 2 : btn === 'middle' ? 1 : 0;
+  // CDP/W3C `buttons` bitmask: left=1, right=2, middle=4. The old mapping
+  // (left=0, middle=1, right=2) is a different namespace and strict event
+  // listeners ignore clicks that arrive with the wrong bit set.
+  const btnNum = btn === 'right' ? 2 : btn === 'middle' ? 4 : 1;
   await c.Input.dispatchMouseEvent({ type: 'mouseMoved', x, y });
   await c.Input.dispatchMouseEvent({ type: 'mousePressed', x, y, button: btn, buttons: btnNum, clickCount: 1 });
   await c.Input.dispatchMouseEvent({ type: 'mouseReleased', x, y, button: btn });
@@ -276,7 +326,11 @@ export async function findElement({ query, strategy }) {
           results.push({ tag: els[i].tagName.toLowerCase(), text: (els[i].textContent || '').trim().substring(0, 80), aria_label: els[i].getAttribute('aria-label') || null, data_name: els[i].getAttribute('data-name') || null, x: rect.x, y: rect.y, width: rect.width, height: rect.height, visible: els[i].offsetParent !== null });
         }
       } else if (strategy === 'aria-label') {
-        var els = document.querySelectorAll('[aria-label*="' + query.replace(/"/g, '\\\\"') + '"]');
+        var nodes = document.querySelectorAll('[aria-label]');
+        var els = [];
+        for (var ni = 0; ni < nodes.length && els.length < 20; ni++) {
+          if ((nodes[ni].getAttribute('aria-label') || '').indexOf(query) !== -1) els.push(nodes[ni]);
+        }
         for (var i = 0; i < Math.min(els.length, 20); i++) {
           var rect = els[i].getBoundingClientRect();
           results.push({ tag: els[i].tagName.toLowerCase(), text: (els[i].textContent || '').trim().substring(0, 80), aria_label: els[i].getAttribute('aria-label') || null, data_name: els[i].getAttribute('data-name') || null, x: rect.x, y: rect.y, width: rect.width, height: rect.height, visible: els[i].offsetParent !== null });

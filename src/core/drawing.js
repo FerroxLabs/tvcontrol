@@ -10,7 +10,16 @@ function _resolve(deps) {
 
 export async function drawShape({ shape, point, point2, overrides: overridesRaw, text, _deps }) {
   const { evaluate, getChartApi } = _resolve(_deps);
-  const overrides = overridesRaw ? (typeof overridesRaw === 'string' ? JSON.parse(overridesRaw) : overridesRaw) : {};
+  let overrides;
+  try {
+    overrides = overridesRaw ? (typeof overridesRaw === 'string' ? JSON.parse(overridesRaw) : overridesRaw) : {};
+  } catch (err) {
+    throw new ClassifiedError(
+      CATEGORIES.INVALID_ARGUMENT,
+      `overrides is not valid JSON: ${err.message}`,
+      { hint: 'Pass overrides as a JSON object or a JSON-encoded object string.' },
+    );
+  }
   const apiPath = await getChartApi();
   const overridesStr = JSON.stringify(overrides || {});
   const textStr = text ? JSON.stringify(text) : '""';

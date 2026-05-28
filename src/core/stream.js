@@ -7,6 +7,20 @@ import { evaluate } from '../connection.js';
 const CHART_API = 'window.TradingViewApi._activeChartWidgetWV.value()';
 const MODEL = `${CHART_API}._chartWidget.model()`;
 
+// Stop-flags for every in-flight pollLoop. A single pair of signal handlers
+// (bound once) flips them all, instead of each loop registering its own
+// SIGINT/SIGTERM listeners — which accumulated toward the MaxListeners warning
+// and left ghost handlers when multiple streams ran in one process.
+const _activeLoops = new Set();
+let _streamSignalsBound = false;
+function _bindStreamSignalsOnce() {
+  if (_streamSignalsBound) return;
+  _streamSignalsBound = true;
+  const stopAll = () => { for (const stop of _activeLoops) stop(); };
+  process.on('SIGINT', stopAll);
+  process.on('SIGTERM', stopAll);
+}
+
 /**
  * Generic poll-and-diff loop.
  * Calls fetcher(), compares to last value, emits JSONL on change.
@@ -17,8 +31,8 @@ async function pollLoop(fetcher, { interval = 500, dedupe = true, label = 'strea
   let running = true;
 
   const cleanup = () => { running = false; };
-  process.on('SIGINT', cleanup);
-  process.on('SIGTERM', cleanup);
+  _bindStreamSignalsOnce();
+  _activeLoops.add(cleanup);
 
   // Emit header with compliance notice
   const start = Date.now();
@@ -51,8 +65,7 @@ async function pollLoop(fetcher, { interval = 500, dedupe = true, label = 'strea
   }
 
   process.stderr.write(`[stream:${label}] stopped after ${((Date.now() - start) / 1000).toFixed(1)}s\n`);
-  process.removeListener('SIGINT', cleanup);
-  process.removeListener('SIGTERM', cleanup);
+  _activeLoops.delete(cleanup);
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -179,7 +192,7 @@ async function fetchLines(studyFilter) {
           data._primitivesDataById.forEach(function(line) {
             var p1 = line.points && line.points[0] ? line.points[0].price : null;
             var p2 = line.points && line.points[1] ? line.points[1].price : null;
-            var price = (p1 !== null && p1 === p2) ? p1 : (p1 || p2);
+            var price = (p1 !== null && p1 === p2) ? p1 : (p1 !== null ? p1 : p2);
             if (price !== null && !seen[price]) { seen[price] = true; levels.push(price); }
           });
           levels.sort(function(a, b) { return b - a; });

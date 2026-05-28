@@ -94,7 +94,21 @@ export async function create({ condition, price, message }) {
     );
   }
 
-  return { success: true, price, condition, message: message || '(none)', price_set: !!priceSet, source: 'dom_fallback' };
+  // `condition` is NOT applied by this DOM fallback — the alert uses whatever
+  // condition TradingView's dialog defaults to (typically "Crossing").
+  // Implementing the condition dropdown needs live-verified selectors we don't
+  // have; until then, surface this explicitly so the alert's actual trigger is
+  // never SILENTLY wrong — a silent default would produce false signals.
+  return {
+    success: true,
+    price,
+    requested_condition: condition,
+    condition_applied: false,
+    warning: `condition "${condition}" was NOT set programmatically — the alert uses TradingView's default condition. Verify/adjust it in the dialog if the trigger direction matters.`,
+    message: message || '(none)',
+    price_set: !!priceSet,
+    source: 'dom_fallback',
+  };
 }
 
 export async function list() {
@@ -141,13 +155,22 @@ export async function list() {
 
 export async function deleteAlerts({ delete_all, alert_id } = {}) {
   if (delete_all) {
-    const result = await _evaluate(`
-      (function() {
+    const result = await _evaluateAsync(`
+      (async function() {
+        var settle = function(ms){ return new Promise(function(r){ setTimeout(r, ms); }); };
         var alertBtn = document.querySelector('[data-name="alerts"]');
         if (alertBtn) alertBtn.click();
-        var header = document.querySelector('[data-name="alerts"]');
+        // Wait a layout tick for the panel to render. The old code re-queried
+        // [data-name="alerts"] SYNCHRONOUSLY and matched the SIDEBAR BUTTON
+        // again — right-clicking the button instead of the panel header, a
+        // silent no-op. Use a distinct panel-header selector here.
+        await settle(400);
+        var header = document.querySelector('.widgetbar-widgetheader')
+          || document.querySelector('[class*="widgetbar"] [class*="header"]')
+          || document.querySelector('[data-name="alerts-settings-button"]');
         if (header) {
-          header.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 100, clientY: 100 }));
+          var rect = header.getBoundingClientRect();
+          header.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: rect.x + 10, clientY: rect.y + 10 }));
           return { context_menu_opened: true };
         }
         return { context_menu_opened: false };
@@ -214,6 +237,8 @@ export async function deleteById({ alert_id, _deps } = {}) {
   return {
     success: false,
     method: 'dom_fallback_unsupported',
+    category: CATEGORIES.API_UNEXPECTED,
     error: 'Individual alert deletion via DOM not supported; use delete_all:true or ensure REST endpoint is reachable',
+    hint: 'Ensure you are logged in and the pricealerts REST endpoint is reachable, or use alert_delete with delete_all:true.',
   };
 }

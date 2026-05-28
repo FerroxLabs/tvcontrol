@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { cartesianProduct, strategySweep } from '../src/core/sweep.js';
+import { cartesianProduct, strategySweep, _cacheHash } from '../src/core/sweep.js';
 import { ClassifiedError, CATEGORIES } from '../src/errors.js';
 
 let TMP;
@@ -86,6 +86,40 @@ describe('cartesianProduct()', () => {
     const result = cartesianProduct({});
     assert.deepEqual(result, [{}]);
   });
+
+  it('treats scalar inputs as single-element — no "not iterable" crash', () => {
+    const result = cartesianProduct({ length: 20, mult: [1, 2, 3] });
+    assert.equal(result.length, 3);
+    for (const combo of result) {
+      assert.equal(combo.length, 20);
+      assert.ok([1, 2, 3].includes(combo.mult));
+    }
+  });
+
+  it('all-scalar inputs yield a single combo', () => {
+    assert.deepEqual(cartesianProduct({ a: 1, b: 2 }), [{ a: 1, b: 2 }]);
+  });
+});
+
+describe('_cacheHash() — determinism + width', () => {
+  it('is stable across input key order', () => {
+    assert.equal(
+      _cacheHash('st_1', 'ES1!', '15', { a: 1, b: 2 }),
+      _cacheHash('st_1', 'ES1!', '15', { b: 2, a: 1 }),
+    );
+  });
+
+  it('differs when any keyed field differs', () => {
+    const base = _cacheHash('st_1', 'ES1!', '15', { a: 1 });
+    assert.notEqual(base, _cacheHash('st_2', 'ES1!', '15', { a: 1 }));
+    assert.notEqual(base, _cacheHash('st_1', 'NQ1!', '15', { a: 1 }));
+    assert.notEqual(base, _cacheHash('st_1', 'ES1!', '60', { a: 1 }));
+    assert.notEqual(base, _cacheHash('st_1', 'ES1!', '15', { a: 2 }));
+  });
+
+  it('is 128-bit (32 hex chars)', () => {
+    assert.equal(_cacheHash('st_1', 'ES1!', '15', { a: 1 }).length, 32);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -93,6 +127,20 @@ describe('cartesianProduct()', () => {
 // ---------------------------------------------------------------------------
 
 describe('strategySweep() — validation', () => {
+  it('rejects a path-traversal resume_from_run_id', async () => {
+    await assert.rejects(
+      () => strategySweep({
+        symbols: ['ES1!'], timeframes: ['15'], inputs: {}, entity_id: 'st_x',
+        resume_from_run_id: '../../etc/passwd', restore_start_state: false,
+      }),
+      (err) => {
+        assert.ok(err instanceof ClassifiedError);
+        assert.equal(err.category, CATEGORIES.INVALID_ARGUMENT);
+        return true;
+      },
+    );
+  });
+
   it('max_combinations=50 with 100 requested throws ClassifiedError', async () => {
     await assert.rejects(
       () => strategySweep({
@@ -226,7 +274,7 @@ describe('strategySweep() — on_error', () => {
     );
   });
 
-  it('on_error=abort writes partial checkpoint before re-throw (audit lens A4)', async () => {
+  it('on_error=abort writes partial checkpoint before re-throw', async () => {
     const writes = [];
     const { _deps } = makeDeps({ failOnCombo: 1 }); // first combo succeeds, second fails
     _deps.writePartial = (data) => { writes.push(JSON.parse(JSON.stringify(data))); };
@@ -250,7 +298,7 @@ describe('strategySweep() — on_error', () => {
   });
 });
 
-describe('strategySweep() — cleanup_warnings on restore failure (audit lens B-CRIT)', () => {
+describe('strategySweep() — cleanup_warnings on restore failure', () => {
   it('surfaces restore failure as cleanup_warnings in response, not silent', async () => {
     const { _deps } = makeDeps();
     _deps.restore = async () => { throw new Error('snapshot file corrupt'); };
@@ -273,7 +321,7 @@ describe('strategySweep() — cleanup_warnings on restore failure (audit lens B-
     assert.ok(result.warnings && result.warnings.some(w => w.includes('Cleanup restore_start_state failed')));
   });
 
-  it('surfaces deleteSnapshot failure as cleanup_warnings (audit lens B-CRIT)', async () => {
+  it('surfaces deleteSnapshot failure as cleanup_warnings', async () => {
     const { _deps } = makeDeps();
     _deps.deleteSnapshot = async () => { throw new Error('ENOENT'); };
 

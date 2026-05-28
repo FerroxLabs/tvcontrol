@@ -1,5 +1,5 @@
 /**
- * Tests for getIndicator() — API path and DOM Data Window fallback (W3.4).
+ * Tests for getIndicator() — API path and DOM Data Window fallback.
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';

@@ -11,18 +11,36 @@ export async function waitForChartReady(expectedSymbol = null, expectedTf = null
   while (Date.now() - start < timeout) {
     const state = await evaluate(`
       (function() {
-        // Check for loading spinner
+        // Check for loading spinner. offsetParent is null for position:fixed
+        // elements even when visible, so a fixed overlay spinner would read as
+        // "not loading" — check computed style instead of relying on offsetParent.
         var spinner = document.querySelector('[class*="loader"]')
           || document.querySelector('[class*="loading"]')
           || document.querySelector('[data-name="loading"]');
-        var isLoading = spinner && spinner.offsetParent !== null;
+        var isLoading = false;
+        if (spinner) {
+          var cs = window.getComputedStyle(spinner);
+          isLoading = cs.display !== 'none' && cs.visibility !== 'hidden'
+            && (spinner.offsetParent !== null || cs.position === 'fixed');
+        }
 
-        // Try to get bar count from data window or chart
+        // Prefer the REAL series bar count from the chart model. The old DOM
+        // scan of [class*="bar"] also matched toolbar/sidebar/scrollbar chrome,
+        // which is stable from the first paint and gave a false "ready".
         var barCount = -1;
         try {
-          var bars = document.querySelectorAll('[class*="bar"]');
-          barCount = bars.length;
+          var api = window.TradingViewApi && window.TradingViewApi._activeChartWidgetWV
+            && window.TradingViewApi._activeChartWidgetWV.value
+            && window.TradingViewApi._activeChartWidgetWV.value();
+          if (api && api._chartWidget) {
+            var seriesBars = api._chartWidget.model().mainSeries().bars();
+            if (seriesBars && typeof seriesBars.size === 'function') barCount = seriesBars.size();
+          }
         } catch {}
+        if (barCount === -1) {
+          // Fallback only when the chart API isn't ready yet.
+          try { barCount = document.querySelectorAll('[class*="bar"]').length; } catch {}
+        }
 
         // Get current symbol from header
         var symbolEl = document.querySelector('[data-name="legend-source-title"]')
@@ -67,6 +85,10 @@ export async function waitForChartReady(expectedSymbol = null, expectedTf = null
     await new Promise(r => setTimeout(r, POLL_INTERVAL));
   }
 
-  // Timeout — return true anyway, caller should verify
+  // Timeout — caller MUST check the return value and treat false as
+  // "chart never stabilized". The previous comment claimed "return true
+  // anyway" but the code returned false; callers that ignored the boolean
+  // (notably the sweep loop) silently produced metrics from half-loaded
+  // charts.
   return false;
 }

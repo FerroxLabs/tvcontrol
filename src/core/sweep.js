@@ -2,7 +2,7 @@
  * Core strategy sweep logic.
  * Iterates a strategy across Cartesian product of symbols × timeframes × indicator inputs.
  */
-import { writeFileSync, mkdirSync, existsSync, readFileSync, renameSync } from 'node:fs';
+import { writeFileSync, mkdirSync, existsSync, readFileSync, renameSync, unlinkSync, readdirSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
@@ -16,6 +16,7 @@ import { snapshot as _snapshot, restore as _restore, deleteSnapshot as _deleteSn
 import { runCombosParallel } from './sweep_parallel.js';
 import { evaluate as _evalConn } from '../connection.js';
 import { strictResolve } from './_resolve.js';
+import { parseJsonSafe } from './_json.js';
 
 const _SWEEP_DEPS = new Set([
   'setSymbol', 'setTimeframe', 'waitForChartReady', 'setInputs',
@@ -28,6 +29,7 @@ const _SWEEP_DEPS = new Set([
 export const SWEEPS_DIR = join(homedir(), '.tv-mcp', 'sweeps');
 export const SWEEP_CACHE_DIR = join(homedir(), '.tv-mcp', 'sweep-cache');
 const DEFAULT_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24h
+const MAX_CACHE_FILES = 5000; // LRU cap for the persistent sweep-cache dir
 
 const MAX_CAP = 500;
 const DEFAULT_MAX_COMBINATIONS = 100;
@@ -45,7 +47,11 @@ const DEFAULT_TIMEOUT_PER_COMBO_MS = 30000;
 export function cartesianProduct(inputs) {
   const keys = Object.keys(inputs);
   if (keys.length === 0) return [{}];
-  const values = keys.map(k => inputs[k]);
+  // Wrap scalars in a single-element array so a mixed payload like
+  // { length: 20, mult: [1, 2, 3] } doesn't crash with "values[idx] is not
+  // iterable". The size pre-calc in strategySweep already treats a scalar as
+  // length 1, so this keeps the two paths consistent.
+  const values = keys.map(k => Array.isArray(inputs[k]) ? inputs[k] : [inputs[k]]);
   const result = [];
   function recurse(idx, current) {
     if (idx === keys.length) { result.push({ ...current }); return; }
@@ -80,13 +86,33 @@ function _genRunId() {
   return `sweep_${ts}_${rand}`;
 }
 
+// Allow-shape for run_id used as a filesystem path component. Without
+// this, `resume_from_run_id: "../../snapshots/foo"` would traverse out of
+// SWEEPS_DIR via `join(dir, `${runId}.partial.json`)`. Required prefix
+// `sweep_` (matches _genRunId) anchors the namespace; alphanumeric tail
+// blocks `/`, `\`, `..`, null bytes, and other path-significant chars
+// while still permitting test fixtures and tools that pin their own ids.
+const _RUN_ID_RE = /^sweep_[A-Za-z0-9_-]{1,128}$/;
+function _validateRunId(runId) {
+  if (typeof runId !== 'string' || !_RUN_ID_RE.test(runId)) {
+    throw new ClassifiedError(
+      CATEGORIES.INVALID_ARGUMENT,
+      `Invalid run_id format: ${runId}. Expected "sweep_<id>" with alphanumeric/_- only.`,
+    );
+  }
+}
+
 function _findMetric(metrics, ...keywords) {
   if (!metrics || typeof metrics !== 'object') return undefined;
   for (const key of Object.keys(metrics)) {
     const lower = key.toLowerCase().replace(/[_\s-]/g, '');
     if (keywords.some(kw => lower.includes(kw.toLowerCase().replace(/[_\s-]/g, '')))) {
       const raw = metrics[key];
-      const num = parseFloat(String(raw).replace(/[^0-9.\-]/g, ''));
+      // Keep e/E so scientific notation ("1.2e-5") parses to its real value
+      // instead of being mangled to "1.2-5" -> 1.2. Without the e/E allow,
+      // a strategy whose metric is reported in scientific notation produced
+      // silently-wrong PnL in rankings.
+      const num = parseFloat(String(raw).replace(/[^0-9.\-eE]/g, ''));
       if (!isNaN(num)) return { key, value: num };
     }
   }
@@ -120,9 +146,22 @@ function _comboKey(symbol, timeframe, inputs) {
  * different PnL for the same inputs. Cache entries carry `cached_at` so
  * callers can age them out — backtest history evolves as new bars arrive.
  */
-function _cacheHash(entity_id, symbol, timeframe, inputs) {
-  const canonical = JSON.stringify({ e: entity_id, s: symbol, t: timeframe, i: inputs });
-  return createHash('sha256').update(canonical).digest('hex').slice(0, 16);
+// Deterministic stringify: JSON.stringify follows key INSERTION order, so
+// { a, b } and { b, a } — semantically identical input sets — hash differently
+// and cause false cache misses (re-paying the full multi-minute backtest).
+// Sort keys at every level so the canonical form is stable.
+function _stableStringify(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return '[' + value.map(_stableStringify).join(',') + ']';
+  const keys = Object.keys(value).sort();
+  return '{' + keys.map(k => JSON.stringify(k) + ':' + _stableStringify(value[k])).join(',') + '}';
+}
+
+export function _cacheHash(entity_id, symbol, timeframe, inputs) {
+  const canonical = _stableStringify({ e: entity_id, s: symbol, t: timeframe, i: inputs });
+  // 128-bit slice (was 64): this cache persists across runs, so a 64-bit
+  // keyspace is uncomfortably collision-prone for a long-lived store.
+  return createHash('sha256').update(canonical).digest('hex').slice(0, 32);
 }
 
 function _cacheLoad(hash, maxAgeMs, cacheDir) {
@@ -133,11 +172,26 @@ function _cacheLoad(hash, maxAgeMs, cacheDir) {
   const filePath = join(dir, `${hash}.json`);
   if (!existsSync(filePath)) return null;
   try {
-    const parsed = JSON.parse(readFileSync(filePath, 'utf8'));
-    const age = Date.now() - new Date(parsed.cached_at).getTime();
+    const parsed = parseJsonSafe(readFileSync(filePath, 'utf8'));
+    // Validate cached_at parses to a finite timestamp. Without this guard,
+    // a partial-write/corrupt cache file with missing cached_at produces
+    // age = NaN, NaN > maxAgeMs is false, and the corrupt entry is returned
+    // as fresh — silently poisoning sweeps for 24h. Treat unparseable as
+    // expired so the sweep re-runs and re-stores cleanly.
+    const ts = parsed && parsed.cached_at != null ? new Date(parsed.cached_at).getTime() : NaN;
+    if (!Number.isFinite(ts)) return null;
+    const age = Date.now() - ts;
     if (age > maxAgeMs) return null; // expired
     return parsed;
   } catch { return null; }
+}
+
+// Unique tmp suffix prevents concurrent writes from racing on a shared
+// `.tmp` sidecar name (one process's writeFileSync overwriting another's
+// before either rename completes -> torn entry on disk).
+function _uniqueTmp(filePath) {
+  const rand = Math.random().toString(36).slice(2, 8);
+  return `${filePath}.${process.pid}.${rand}.tmp`;
 }
 
 function _cacheStore(hash, entry, cacheDir) {
@@ -145,29 +199,52 @@ function _cacheStore(hash, entry, cacheDir) {
   try {
     mkdirSync(dir, { recursive: true });
     const filePath = join(dir, `${hash}.json`);
-    const tmp = filePath + '.tmp';
+    const tmp = _uniqueTmp(filePath);
     writeFileSync(tmp, JSON.stringify(entry, null, 2), 'utf8');
     renameSync(tmp, filePath);
   } catch { /* best-effort; sweep still works without cache */ }
 }
 
+// Bound the persistent sweep cache: keep the newest MAX_CACHE_FILES entries,
+// delete the oldest by mtime. Called once per sweep (not per store), so it's a
+// single readdir+stat pass rather than O(combos^2). The cache otherwise grows
+// one file per unique combo forever.
+function _pruneCache(cacheDir) {
+  const dir = cacheDir || SWEEP_CACHE_DIR;
+  try {
+    if (!existsSync(dir)) return;
+    const files = readdirSync(dir).filter(f => f.endsWith('.json'));
+    if (files.length <= MAX_CACHE_FILES) return;
+    const stated = files.map(f => {
+      const p = join(dir, f);
+      try { return { p, mtime: statSync(p).mtimeMs }; } catch { return { p, mtime: 0 }; }
+    });
+    stated.sort((a, b) => a.mtime - b.mtime);
+    for (const { p } of stated.slice(0, stated.length - MAX_CACHE_FILES)) {
+      try { unlinkSync(p); } catch { /* best-effort */ }
+    }
+  } catch { /* best-effort; cache is non-critical */ }
+}
+
 function _writePartialDefault(runId, data, sweepsDir) {
+  _validateRunId(runId);
   const dir = sweepsDir || SWEEPS_DIR;
   mkdirSync(dir, { recursive: true });
   const filePath = join(dir, `${runId}.partial.json`);
-  const tmp = filePath + '.tmp';
+  const tmp = _uniqueTmp(filePath);
   writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
   renameSync(tmp, filePath);
 }
 
 function _loadPartial(runId, sweepsDir) {
+  _validateRunId(runId);
   const dir = sweepsDir || SWEEPS_DIR;
   const filePath = join(dir, `${runId}.partial.json`);
   if (!existsSync(filePath)) throw new ClassifiedError(
     CATEGORIES.API_UNEXPECTED,
     `No partial file found for run_id: ${runId}`,
   );
-  return JSON.parse(readFileSync(filePath, 'utf8'));
+  return parseJsonSafe(readFileSync(filePath, 'utf8'));
 }
 
 export async function strategySweep({
@@ -254,7 +331,8 @@ export async function strategySweep({
     return await _runParallel({
       allCombos, parallelism, entity_id, run_id, startTime, use_cache,
       cache_max_age_ms, _cache_dir, symbolsDuped, timeframesDuped,
-      dedupedSymbols, dedupedTimeframes, cooldown_ms,
+      dedupedSymbols, dedupedTimeframes, cooldown_ms, timeout_per_combo_ms,
+      on_error,
     });
   }
 
@@ -347,7 +425,29 @@ export async function strategySweep({
       try {
         await deps.setSymbol({ symbol: combo.symbol, _deps: cdpDeps });
         await deps.setTimeframe({ timeframe: combo.timeframe, _deps: cdpDeps });
-        await deps.waitForChartReady(combo.symbol, combo.timeframe);
+        // waitForChartReady returns false on timeout. Ignoring it (the old
+        // behavior) meant a half-loaded chart's stale metrics got captured
+        // and cached for 24h. Treat as a soft-skip so the combo is recorded
+        // as failed instead of silently producing wrong PnL.
+        const _ready = await deps.waitForChartReady(combo.symbol, combo.timeframe);
+        if (_ready === false) {
+          results.push({
+            symbol: combo.symbol,
+            timeframe: combo.timeframe,
+            inputs: combo.inputs,
+            error: 'chart_not_ready: waitForChartReady timed out',
+            duration_ms: 0,
+          });
+          if (on_error === 'abort') {
+            try { writePartialFn({ run_id, results }); } catch (_) {}
+            throw new ClassifiedError(
+              CATEGORIES.CHART_LOADING,
+              `Chart never stabilized for ${combo.symbol} ${combo.timeframe}; aborting sweep at result ${results.length}.`,
+              { hint: 'Increase wait timeout or check TradingView; partial results written.' },
+            );
+          }
+          continue;
+        }
 
         if (Object.keys(combo.inputs).length > 0) {
           await deps.setInputs({ entity_id, inputs: combo.inputs });
@@ -358,10 +458,26 @@ export async function strategySweep({
         lastSymbol = combo.symbol;
         lastTimeframe = combo.timeframe;
 
-        const stratResult = await withTimeout(deps.getStrategyResults(), timeout_per_combo_ms);
+        // Capture the promise so we can (a) suppress a late rejection that
+        // would otherwise be unhandled if the timeout wins, and (b) drain it
+        // before the next combo runs — getStrategyResults toggles UI panels,
+        // and an orphaned in-flight call would interleave with the next combo's
+        // symbol/input changes and tear CDP state.
+        const srPromise = deps.getStrategyResults();
+        srPromise.catch(() => {});
+        let stratResult;
+        try {
+          stratResult = await withTimeout(srPromise, timeout_per_combo_ms);
+        } catch (toErr) {
+          await Promise.race([
+            srPromise.then(() => {}, () => {}),
+            new Promise(r => setTimeout(r, 2000)),
+          ]);
+          throw toErr;
+        }
 
-        // getStrategyResults now THROWS on error (W3.5 fix in adff091), so
-        // success-path stratResult is always { success:true, metrics:{...} }.
+        // getStrategyResults now THROWS on error, so success-path stratResult
+        // is always { success:true, metrics:{...} }.
         const combo_metrics = stratResult?.metrics ?? {};
         results.push({
           symbol: combo.symbol,
@@ -419,7 +535,7 @@ export async function strategySweep({
   } finally {
     // Cleanup MUST run on any exit. Capture failures into cleanup_warnings so
     // the user knows their start-state contract was not honored — silent
-    // cleanup failure was a CRITICAL audit finding (lens B).
+    // cleanup failure on abort was a critical issue we previously hit.
     if (startStateSnapshotName) {
       try { await deps.restore({ name: startStateSnapshotName, _snapshots_dir }); }
       catch (err) { cleanup_warnings.push({ stage: 'restore_start_state', error: err.message }); }
@@ -445,6 +561,19 @@ export async function strategySweep({
     warnings.push(`Cleanup ${cw.stage} failed: ${cw.error}`);
   }
 
+  // Disk hygiene: the run finished normally, so the checkpoint partial is stale
+  // (resume only matters for interrupted/aborted runs, which throw before here).
+  // Delete it and bound the cross-run cache. Both best-effort — never fail the
+  // sweep over cleanup. Skip the partial unlink when the caller manages its own
+  // writePartial sink.
+  if (!deps.writePartial) {
+    try {
+      const pf = join(_sweeps_dir || SWEEPS_DIR, `${run_id}.partial.json`);
+      if (existsSync(pf)) unlinkSync(pf);
+    } catch { /* best-effort */ }
+  }
+  if (use_cache) _pruneCache(_cache_dir);
+
   return {
     success: true,
     run_id,
@@ -469,8 +598,18 @@ export async function strategySweep({
 async function _runParallel({
   allCombos, parallelism, entity_id, run_id, startTime, use_cache,
   cache_max_age_ms, _cache_dir, symbolsDuped, timeframesDuped,
-  dedupedSymbols, dedupedTimeframes, cooldown_ms,
+  dedupedSymbols, dedupedTimeframes, cooldown_ms, timeout_per_combo_ms,
+  on_error,
 }) {
+  // NOTE on restore_start_state: unlike the serial path, the parallel path
+  // never mutates the user's active chart. Each combo runs inside a dedicated
+  // spawned worker tab (sweep_parallel.js: workers own their own CDP session
+  // and call setSymbol/setResolution against their OWN tab's
+  // _activeChartWidgetWV). The only thing this path touches on the active
+  // chart is a READ-ONLY metaInfo fetch (_evalConn below). So the start-state
+  // restore contract is satisfied with no action — there is nothing to snapshot
+  // or restore. Do NOT "fix" this by reusing the active chart as a worker
+  // without re-adding a snapshot/restore guard around the dispatch.
   // Cache split: hits resolved instantly, misses dispatched to workers.
   const cachedResults = [];
   const todo = [];
@@ -548,6 +687,7 @@ async function _runParallel({
       base_inputs: studyContext.base_inputs,
       parallelism,
       per_combo_settle_ms: cooldown_ms,
+      timeout_per_combo_ms,
     });
     workerResults = out.results;
     workerInfo = {
@@ -583,9 +723,18 @@ async function _runParallel({
   if (workerInfo.workers_failed_setup > 0) {
     warnings.push(`${workerInfo.workers_failed_setup} worker(s) failed setup; ran on ${workerInfo.parallelism}/${workerInfo.requested_parallelism}.`);
   }
+  if (on_error === 'abort') {
+    // Parallel combos run concurrently in isolated worker tabs, so there is no
+    // single point at which to halt the run the way the serial loop does.
+    // Errors are collected as failed result entries instead of aborting.
+    // Surface this rather than silently ignoring the requested mode.
+    warnings.push('on_error="abort" is not honored when parallelism>1: combos run concurrently in isolated tabs, so failures are collected as failed results instead of aborting. Use parallelism=1 for abort semantics.');
+  }
   for (const cw of parallel_cleanup_warnings) {
     warnings.push(`Worker cleanup ${cw.stage} (worker ${cw.worker_id}): ${cw.reason || cw.error}`);
   }
+
+  if (use_cache) _pruneCache(_cache_dir);
 
   return {
     success: true,

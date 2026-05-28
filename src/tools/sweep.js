@@ -16,6 +16,8 @@ export function registerSweepTools(server) {
     max_combinations: z.coerce.number().int().min(1).max(500).optional()
       .describe('Max combinations allowed (default 100, abs cap 500)'),
     cooldown_ms: z.coerce.number().optional().describe('Cooldown between combos in ms (default 1500)'),
+    same_symbol_cooldown_ms: z.coerce.number().optional()
+      .describe('Shorter cooldown when only inputs change (same symbol+timeframe). Default 200ms; clamped to [0, cooldown_ms].'),
     timeout_per_combo_ms: z.coerce.number().optional().describe('Timeout per combo in ms (default 30000)'),
     on_error: z.enum(['continue', 'abort']).optional().describe('Error behavior (default "continue")'),
     restore_start_state: z.coerce.boolean().optional()
@@ -28,13 +30,13 @@ export function registerSweepTools(server) {
     parallelism: z.coerce.number().int().min(1).max(6).optional()
       .describe('Spawn N worker tabs and run combos in parallel (default 1 = serial). Cap 6.'),
   }, async ({ symbols, timeframes, inputs, entity_id, max_combinations, cooldown_ms,
-    timeout_per_combo_ms, on_error, restore_start_state, resume_from_run_id,
-    use_cache, cache_max_age_ms, parallelism }) => {
+    same_symbol_cooldown_ms, timeout_per_combo_ms, on_error, restore_start_state,
+    resume_from_run_id, use_cache, cache_max_age_ms, parallelism }) => {
     try {
       return jsonResult(await strategySweep({
         symbols, timeframes, inputs, entity_id, max_combinations, cooldown_ms,
-        timeout_per_combo_ms, on_error, restore_start_state, resume_from_run_id,
-        use_cache, cache_max_age_ms, parallelism,
+        same_symbol_cooldown_ms, timeout_per_combo_ms, on_error, restore_start_state,
+        resume_from_run_id, use_cache, cache_max_age_ms, parallelism,
       }));
     } catch (err) { return errorResult(err); }
   });

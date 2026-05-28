@@ -80,7 +80,10 @@ export async function batchRun({ symbols, timeframes, action, delay_ms, ohlcv_co
 
   const successCount = results.filter((r) => r.success).length;
   return {
-    success: true,
+    // success reflects whether ANY iteration succeeded. Returning success:true
+    // when every symbol/timeframe failed (the old behavior) masked a total
+    // failure as a successful batch.
+    success: results.length === 0 ? true : successCount > 0,
     total_iterations: results.length,
     successful: successCount,
     failed: results.length - successCount,

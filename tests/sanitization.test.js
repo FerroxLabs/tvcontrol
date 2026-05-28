@@ -1,6 +1,6 @@
 /**
  * Tests for CDP input sanitization utilities and their integration across modules.
- * Covers safeString(), requireFinite(), source audit, and per-module validation.
+ * Covers safeString(), requireFinite(), source-level checks, and per-module validation.
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
@@ -99,6 +99,17 @@ describe('requireFinite() — numeric validation', () => {
     assert.throws(() => requireFinite(undefined, 'x'), /x must be a finite number/);
   });
 
+  it('rejects values Number() would silently coerce to 0 (D1 hardening)', () => {
+    // [], {}, booleans, and empty/whitespace strings all Number()-coerce to 0;
+    // accepting them would let a bad caller write 0 into TradingView state.
+    assert.throws(() => requireFinite([], 'x'), /x must be a finite number/);
+    assert.throws(() => requireFinite({}, 'x'), /x must be a finite number/);
+    assert.throws(() => requireFinite(false, 'x'), /x must be a finite number/);
+    assert.throws(() => requireFinite(true, 'x'), /x must be a finite number/);
+    assert.throws(() => requireFinite('   ', 'x'), /finite number/);
+    assert.throws(() => requireFinite('', 'x'), /finite number/);
+  });
+
   it('includes bad value in error message', () => {
     assert.throws(() => requireFinite('oops', 'field'), /got: oops/);
   });
@@ -162,10 +173,13 @@ describe('chart.js — sanitized evaluate calls', () => {
   it('manageIndicator add uses safeString for indicator name', async () => {
     const { _deps, evaluate } = mockDeps();
     evaluate.calls.length = 0;
-    // First evaluate call is getAllStudies (before), then createStudy, then getAllStudies (after)
+    // getAllStudies is called twice: before (empty) then after (new study
+    // present), so the add registers as successful. manageIndicator now throws
+    // when no new study appears, so the mock must model a real successful add.
+    let studiesCalls = 0;
     const evalFn = async (expr) => {
       evaluate.calls.push(expr);
-      if (expr.includes('getAllStudies')) return ['id1'];
+      if (expr.includes('getAllStudies')) { studiesCalls++; return studiesCalls === 1 ? [] : ['rsi_new']; }
       return undefined;
     };
     _deps.evaluate = evalFn;
@@ -262,9 +276,9 @@ describe('drawing.js — sanitized evaluate calls', () => {
   });
 });
 
-// ── Source-level audit ───────────────────────────────────────────────────
+// ── Source-level checks ──────────────────────────────────────────────────
 
-describe('source audit — no unsafe interpolation patterns', () => {
+describe('source-level checks — no unsafe interpolation patterns', () => {
   const CORE_DIR = new URL('../src/core/', import.meta.url).pathname;
   const coreFiles = readdirSync(CORE_DIR).filter(f => f.endsWith('.js'));
 

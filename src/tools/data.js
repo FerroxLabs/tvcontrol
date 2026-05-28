@@ -4,7 +4,7 @@ import * as core from '../core/data.js';
 
 export function registerDataTools(server) {
   server.tool('data_get_ohlcv', 'Get OHLCV bar data from the chart. Use summary=true for compact stats instead of all bars (saves context).', {
-    count: z.coerce.number().optional().describe('Number of bars to retrieve (max 500, default 100)'),
+    count: z.coerce.number().int().min(1).max(500).optional().describe('Number of bars to retrieve (1-500, default 100)'),
     summary: z.coerce.boolean().optional().describe('Return summary stats (high, low, open, close, avg volume, range) instead of all bars — much smaller output'),
   }, async ({ count, summary }) => {
     try { return jsonResult(await core.getOhlcv({ count, summary })); }
@@ -24,7 +24,7 @@ export function registerDataTools(server) {
   });
 
   server.tool('data_get_trades', 'Get trade list from Strategy Tester', {
-    max_trades: z.coerce.number().optional().describe('Maximum trades to return'),
+    max_trades: z.coerce.number().int().min(1).max(20).optional().describe('Maximum trades to return (1-20, default 20)'),
   }, async ({ max_trades }) => {
     try { return jsonResult(await core.getTrades({ max_trades })); }
     catch (err) { return errorResult(err); }
@@ -44,7 +44,12 @@ export function registerDataTools(server) {
 
   server.tool('depth_get', 'Get order book / DOM (Depth of Market) data from the chart', {}, async () => {
     try { return jsonResult(await core.getDepth()); }
-    catch (err) { return jsonResult({ success: false, error: err.message, hint: 'Open the DOM panel in TradingView before using this tool.' }, true); }
+    catch (err) {
+      // Preserve a ClassifiedError's category/hint (was stripped by the manual
+      // shape below); only synthesize the DOM-panel hint for unclassified errors.
+      if (err?.category) return errorResult(err);
+      return jsonResult({ success: false, error: err.message, category: 'tv_ui_changed', hint: 'Open the DOM panel in TradingView before using this tool.' }, true);
+    }
   });
 
   server.tool('data_get_pine_lines', 'Read horizontal price levels drawn by Pine Script indicators (line.new). Returns deduplicated price levels per study. Use study_filter to target a specific indicator.', {

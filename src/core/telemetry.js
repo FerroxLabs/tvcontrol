@@ -31,6 +31,15 @@ const DEFAULT_EXCLUDE = new Set([
   'chart_get_state',  // polled by every read workflow
 ]);
 
+// Security-sensitive tools are ALWAYS logged for audit, even when telemetry is
+// otherwise disabled and even if a user puts them in TV_MCP_TELEMETRY_EXCLUDE.
+// ui_evaluate runs arbitrary JS in the authenticated TradingView page (full
+// RCE surface); every invocation must leave a trace on disk so an operator can
+// reconstruct what was executed. This is a hard floor, not an opt-in.
+const FORCE_LOG = new Set([
+  'ui_evaluate',
+]);
+
 let _queue = [];
 let _flushTimer = null;
 
@@ -39,6 +48,9 @@ export function isEnabled() {
 }
 
 export function shouldLog(toolName) {
+  // Hard floor: security-sensitive tools are logged unconditionally, before
+  // the enable/exclude checks below can suppress them.
+  if (FORCE_LOG.has(toolName)) return true;
   if (!isEnabled()) return false;
   if (toolName.startsWith('stream_')) return false;
   // Env var overrides: TV_MCP_TELEMETRY_INCLUDE, TV_MCP_TELEMETRY_EXCLUDE (comma-separated)

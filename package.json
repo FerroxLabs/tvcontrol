@@ -16,7 +16,7 @@
     "start": "node src/server.js",
     "tv": "node src/cli/index.js",
     "test": "npm run test:offline",
-    "test:offline": "node --test tests/sanitization.test.js tests/replay.test.js tests/pine_analyze.test.js tests/cli.test.js tests/fixtures.test.js tests/errors.test.js tests/watchlist.test.js tests/alerts.test.js tests/state.test.js tests/sweep.test.js tests/vision.test.js tests/data_get_indicator.test.js tests/telemetry.test.js tests/tool_count.test.js tests/integration.test.js",
+    "test:offline": "node --test tests/sanitization.test.js tests/connection.test.js tests/replay.test.js tests/pine_analyze.test.js tests/cli.test.js tests/fixtures.test.js tests/errors.test.js tests/watchlist.test.js tests/alerts.test.js tests/state.test.js tests/sweep.test.js tests/sweep_parallel.test.js tests/vision.test.js tests/data_get_indicator.test.js tests/telemetry.test.js tests/tool_count.test.js tests/integration.test.js",
     "test:e2e": "node --test tests/e2e.test.js",
     "test:unit": "node --test tests/pine_analyze.test.js tests/cli.test.js",
     "test:cli": "node --test tests/cli.test.js",
@@ -25,10 +25,10 @@
     "test:count": "node --test --test-reporter=spec tests/e2e.test.js 2>&1 | tail -5"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=18.14.1"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.1",
-    "chrome-remote-interface": "^0.33.2"
+    "@modelcontextprotocol/sdk": "1.12.1",
+    "chrome-remote-interface": "0.33.2"
   }
 }

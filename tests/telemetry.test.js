@@ -91,6 +91,17 @@ describe('shouldLog()', () => {
       assert.equal(shouldLog('alert_create'), true);
     });
   });
+
+  it('ui_evaluate is force-logged even when telemetry is disabled (security audit-log floor)', () => {
+    // Security floor: ui_evaluate runs arbitrary page JS (RCE), so every call
+    // must leave an audit trace regardless of the telemetry setting or excludes.
+    withEnv({ TV_MCP_TELEMETRY: undefined, TV_MCP_TELEMETRY_INCLUDE: undefined, TV_MCP_TELEMETRY_EXCLUDE: undefined }, () => {
+      assert.equal(shouldLog('ui_evaluate'), true);
+    });
+    withEnv({ TV_MCP_TELEMETRY: '1', TV_MCP_TELEMETRY_EXCLUDE: 'ui_evaluate' }, () => {
+      assert.equal(shouldLog('ui_evaluate'), true, 'force-log overrides an explicit exclude');
+    });
+  });
 });
 
 describe('record()', () => {
