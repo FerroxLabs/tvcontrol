@@ -71,6 +71,8 @@ If your version of TradingView reshapes some internal API, the verify battery is
 
 ## Quick starts
 
+> Also on npm: `npm install -g @ferroxlabs/tvcontrol` puts the `tv` and `tvcontrol` commands on your PATH (works for [Path C](#path-c-cli-only-no-agent-required); for the MCP-server paths below, the global install lives under `$(npm root -g)/@ferroxlabs/tvcontrol/`).
+
 ### Path A. Claude Code, one prompt to install
 
 Paste this into Claude Code once and let it do the rest.

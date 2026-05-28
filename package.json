@@ -1,6 +1,6 @@
 {
   "name": "@ferroxlabs/tvcontrol",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "AI remote control for TradingView Desktop — 88 MCP tools driving symbols, indicators, Pine Script, snapshots, sweeps, and live chart vision over CDP.",
   "type": "module",
   "license": "MIT",
