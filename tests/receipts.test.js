@@ -1,22 +1,33 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { resolveReceiptPath } from '../src/core/receipts.js';
 
 test('receipt paths default beneath the TVControl data directory', () => {
-  assert.equal(
-    resolveReceiptPath({ kind: 'soak', filename: 'run.json', home: '/Users/alice' }),
-    '/Users/alice/.tv-mcp/soak/run.json',
-  );
+  const home = mkdtempSync(join(tmpdir(), 'tvcontrol-home-'));
+  try {
+    assert.equal(
+      resolveReceiptPath({ kind: 'soak', filename: 'run.json', home }),
+      join(realpathSync(home), '.tv-mcp', 'soak', 'run.json'),
+    );
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test('receipt paths allow an explicit nested TVControl directory', () => {
-  assert.equal(
-    resolveReceiptPath({ kind: 'soak', filename: 'run.json', outputDir: '/Users/alice/.tv-mcp/custom', home: '/Users/alice' }),
-    '/Users/alice/.tv-mcp/custom/run.json',
-  );
+  const home = mkdtempSync(join(tmpdir(), 'tvcontrol-home-'));
+  try {
+    const outputDir = join(home, '.tv-mcp', 'custom');
+    assert.equal(
+      resolveReceiptPath({ kind: 'soak', filename: 'run.json', outputDir, home }),
+      join(realpathSync(home), '.tv-mcp', 'custom', 'run.json'),
+    );
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test('receipt paths reject traversal outside the TVControl data directory', () => {

@@ -49,6 +49,7 @@ All notable changes to TVControl are documented here. This project follows [Sema
 - `tab_new` always creates and selects a fresh Desktop tab instead of reusing an existing layout-picker target.
 - CLI signal handling no longer suppresses ordinary Ctrl-C termination, and stream reconnect waits are interruptible.
 - Reliability receipts and support bundles reject output directories outside `~/.tv-mcp/`.
+- Offline receipt and source-scan tests now use platform-native paths on Windows.
 - State-changing batch, quote, sweep, and snapshot operations surface restoration and cleanup failures instead of silently leaving chart drift.
 - Streaming reconnect backoff, telemetry flushing, screenshot naming, and parallel sweep worker cleanup are bounded and deterministic.
 
