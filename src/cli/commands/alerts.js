@@ -15,11 +15,15 @@ register('alert', {
         price: { type: 'string', short: 'p', description: 'Price level' },
         condition: { type: 'string', short: 'c', description: 'Condition: crossing, greater_than, less_than' },
         message: { type: 'string', short: 'm', description: 'Alert message' },
+        'no-mobile-push': { type: 'boolean', description: 'Disable mobile push notification' },
+        'expiration-days': { type: 'string', description: 'Expiration in days (1-365; default 30)' },
       },
       handler: (opts) => core.create({
         price: Number(opts.price),
         condition: opts.condition || 'crossing',
         message: opts.message,
+        mobile_push: !opts['no-mobile-push'],
+        expiration_days: opts['expiration-days'] ? Number(opts['expiration-days']) : undefined,
       }),
     }],
     ['delete', {
@@ -30,9 +34,7 @@ register('alert', {
       },
       handler: (opts) => {
         _arg(opts.id || opts.all, '--id <alert_id> or --all required. Usage: tv alert delete --id 12345  |  tv alert delete --all');
-        return opts.id
-          ? core.deleteById({ alert_id: opts.id })
-          : core.deleteAlerts({ delete_all: opts.all });
+        return core.deleteAlerts({ alert_id: opts.id, delete_all: opts.all });
       },
     }],
   ]),

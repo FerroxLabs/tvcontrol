@@ -1,7 +1,10 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { disconnect } from './connection.js';
-import { instrument } from './tools/_format.js';
+import { flushNow as flushTelemetry } from './core/telemetry.js';
+import { errorResult, instrument } from './tools/_format.js';
+import { coordinateMcpHandler } from './core/coordination.js';
+import { gateToolHandler } from './core/capabilities.js';
 import { registerHealthTools } from './tools/health.js';
 import { registerChartTools } from './tools/chart.js';
 import { registerPineTools } from './tools/pine.js';
@@ -17,15 +20,17 @@ import { registerUiTools } from './tools/ui.js';
 import { registerPaneTools } from './tools/pane.js';
 import { registerTabTools } from './tools/tab.js';
 import { registerVisionTools } from './tools/vision.js';
+import { registerStateTools } from './tools/state.js';
+import { registerSweepTools } from './tools/sweep.js';
 
 const server = new McpServer(
   {
     name: 'tvcontrol',
-    version: '2.0.0',
-    description: 'AI remote control for TradingView Desktop — 88 MCP tools driving symbols, indicators, Pine Script, snapshots, sweeps, and live chart vision over CDP.',
+    version: '2.2.0',
+    description: 'AI remote control for TradingView Desktop — 102 MCP tools driving symbols, indicators, Pine Script, snapshots, sweeps, diagnostics, and live chart vision over CDP.',
   },
   {
-    instructions: `tvcontrol — 88 tools for reading and controlling a live TradingView Desktop chart over Chrome DevTools Protocol.
+    instructions: `tvcontrol — 102 tools for reading, diagnosing, and controlling a live TradingView Desktop chart over Chrome DevTools Protocol.
 
 TOOL SELECTION GUIDE — use this to pick the right tool:
 
@@ -63,7 +68,7 @@ Launch: tv_launch → auto-detect and start TradingView with CDP on any platform
 Panes: pane_list, pane_set_layout (s, 2h, 2v, 4, 6, 8), pane_focus, pane_set_symbol
 Tabs: tab_list, tab_new, tab_close, tab_switch
 
-Advanced (opt-in): ui_evaluate (run arbitrary page JS) is GATED behind the TV_MCP_ADVANCED=1 env var and is NOT registered by default. Of the 88-tool catalog, 87 are available unless that flag is set.
+Advanced (opt-in): ui_evaluate (run arbitrary page JS) is GATED behind the TV_MCP_ADVANCED=1 env var and is NOT registered by default. Of the 102-tool catalog, 101 are available unless that flag is set.
 
 CONTEXT MANAGEMENT:
 - ALWAYS use summary=true on data_get_ohlcv
@@ -82,7 +87,11 @@ CONTEXT MANAGEMENT:
 const _origTool = server.tool.bind(server);
 server.tool = (name, ...rest) => {
   const handler = rest[rest.length - 1];
-  rest[rest.length - 1] = instrument(name, handler);
+  const gated = gateToolHandler(name, coordinateMcpHandler(name, handler));
+  rest[rest.length - 1] = instrument(name, async (...args) => {
+    try { return await gated(...args); }
+    catch (err) { return errorResult(err); }
+  });
   return _origTool(name, ...rest);
 };
 
@@ -101,6 +110,8 @@ registerWatchlistTools(server);
 registerUiTools(server);
 registerPaneTools(server);
 registerTabTools(server);
+registerStateTools(server);
+registerSweepTools(server);
 registerVisionTools(server);
 
 // Startup notice (stderr so it doesn't interfere with MCP stdio protocol)
@@ -111,12 +122,13 @@ process.stderr.write('   Ensure your usage complies with TradingView\'s Terms of
 // releases the attached target session instead of leaking it on every MCP-host
 // restart (sessions accumulate until Electron refuses new DevTools clients). A
 // bare SIGTERM listener also suppresses Node's default-terminate, so without
-// this exit the process would hang on `kill`. telemetry.js owns its own flush
-// handlers; these run alongside to add the disconnect + a definitive exit.
+// this exit the process would hang on `kill`. Flush telemetry here because
+// process.exit() does not emit beforeExit.
 let _shuttingDown = false;
 async function _gracefulShutdown(code) {
   if (_shuttingDown) return;
   _shuttingDown = true;
+  try { flushTelemetry(); } catch { /* best-effort — exiting regardless */ }
   try { await disconnect(); } catch { /* best-effort — exiting regardless */ }
   process.exit(code);
 }

@@ -463,7 +463,7 @@ export async function strategySweep({
         // before the next combo runs — getStrategyResults toggles UI panels,
         // and an orphaned in-flight call would interleave with the next combo's
         // symbol/input changes and tear CDP state.
-        const srPromise = deps.getStrategyResults();
+        const srPromise = deps.getStrategyResults({ entity_id });
         srPromise.catch(() => {});
         let stratResult;
         try {

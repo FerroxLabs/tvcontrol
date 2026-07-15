@@ -69,6 +69,8 @@ export async function openPanel({ panel, action }) {
           performed = 'opened';
         } else if (action === 'close' || (action === 'toggle' && isOpen)) {
           if (typeof bwb.hideWidget === 'function') bwb.hideWidget(widgetName);
+          else if (typeof bwb.close === 'function') bwb.close();
+          else if (typeof bwb.hide === 'function') bwb.hide();
           performed = 'closed';
         }
         return { was_open: isOpen, performed: performed };
@@ -78,17 +80,22 @@ export async function openPanel({ panel, action }) {
     return { success: true, panel, action, was_open: result?.was_open ?? false, performed: result?.performed ?? 'unknown' };
   } else {
     const selectorMap = {
-      'watchlist': { dataName: 'base-watchlist-widget-button', ariaLabel: 'Watchlist' },
-      'alerts': { dataName: 'alerts-button', ariaLabel: 'Alerts' },
-      'trading': { dataName: 'trading-button', ariaLabel: 'Trading Panel' },
+      'watchlist': {
+        dataNames: ['base-watchlist-widget-button', 'base'],
+        ariaLabels: ['Watchlist', 'Watchlist, details, and news'],
+      },
+      'alerts': { dataNames: ['alerts-button', 'alerts'], ariaLabels: ['Alerts'] },
+      'trading': { dataNames: ['trading-button'], ariaLabels: ['Trading Panel'] },
     };
     const sel = selectorMap[panel];
     const result = await evaluate(`
       (function() {
-        var dataName = ${JSON.stringify(sel.dataName)};
-        var ariaLabel = ${JSON.stringify(sel.ariaLabel)};
+        var dataNames = ${JSON.stringify(sel.dataNames)};
+        var ariaLabels = ${JSON.stringify(sel.ariaLabels)};
         var action = ${JSON.stringify(action)};
-        var btn = document.querySelector('[data-name="' + dataName + '"]') || document.querySelector('[aria-label="' + ariaLabel + '"]');
+        var btn = null;
+        for (var d = 0; d < dataNames.length && !btn; d++) btn = document.querySelector('[data-name="' + dataNames[d] + '"]');
+        for (var a = 0; a < ariaLabels.length && !btn; a++) btn = document.querySelector('[aria-label="' + ariaLabels[a] + '"]');
         if (!btn) return { error: 'Button not found for panel: ' + ${JSON.stringify(panel)} };
         var isActive = btn.getAttribute('aria-pressed') === 'true' || btn.classList.contains('isActive') || btn.classList.toString().indexOf('active') !== -1 || btn.classList.toString().indexOf('Active') !== -1;
         var rightArea = document.querySelector('[class*="layout__area--right"]');
@@ -102,7 +109,7 @@ export async function openPanel({ panel, action }) {
         return { was_open: isOpen, performed: performed };
       })()
     `);
-    if (result && result.error) throw new ClassifiedError(CATEGORIES.API_UNEXPECTED, result.error);
+    if (result && result.error) throw new ClassifiedError(CATEGORIES.TV_UI_CHANGED, result.error);
     return { success: true, panel, action, was_open: result?.was_open ?? false, performed: result?.performed ?? 'unknown' };
   }
 }
@@ -120,7 +127,9 @@ export async function fullscreen() {
   return { success: true, action: 'fullscreen_toggled' };
 }
 
-export async function layoutList() {
+export async function layoutList({ limit = 50, offset = 0, include_details = false } = {}) {
+  const boundedLimit = Math.max(1, Math.min(100, Number(limit) || 50));
+  const boundedOffset = Math.max(0, Number(offset) || 0);
   const layouts = await evaluateAsync(`
     new Promise(function(resolve) {
       try {
@@ -145,7 +154,20 @@ export async function layoutList() {
       { hint: 'TradingView\'s getSavedCharts didn\'t respond within 5s. Open and re-save a layout via the TradingView UI, then retry. If it persists, the saved-layouts API path may have moved — file an issue.' },
     );
   }
-  return { success: true, layout_count: layouts?.layouts?.length || 0, source: layouts?.source, layouts: layouts?.layouts || [] };
+  const allLayouts = layouts?.layouts || [];
+  const page = allLayouts.slice(boundedOffset, boundedOffset + boundedLimit).map((layout) => include_details
+    ? layout
+    : { id: layout.id, name: layout.name });
+  return {
+    success: true,
+    layout_count: allLayouts.length,
+    returned_count: page.length,
+    offset: boundedOffset,
+    limit: boundedLimit,
+    has_more: boundedOffset + page.length < allLayouts.length,
+    source: layouts?.source,
+    layouts: page,
+  };
 }
 
 export async function layoutSwitch({ name }) {

@@ -1,75 +1,225 @@
 /**
  * Core health/discovery/launch logic.
  */
-import { getClient, getTargetInfo, evaluate } from '../connection.js';
-import { existsSync } from 'fs';
+import { getClient, getTargetInfo, evaluate, CDP_HOST, CDP_PORT } from '../connection.js';
+import { existsSync, cpSync, rmSync, readdirSync, mkdirSync, readFileSync, writeFileSync, renameSync, statSync, unlinkSync } from 'fs';
 import { execFileSync, spawn } from 'child_process';
+import { dirname, basename, join, win32 as pathWin32 } from 'path';
+import { homedir } from 'os';
 import { ClassifiedError, CATEGORIES } from '../errors.js';
 
-export async function healthCheck() {
-  await getClient();
-  const target = await getTargetInfo();
+export const RECONNECT_TEXT_PATTERN = /^(?:reconnecting|connecting|offline|no connection|connection lost|reconectando|conectando|sin conexi[oó]n|conexi[oó]n perdida|verbindung wird wiederhergestellt|verbinden|keine verbindung|verbindung verloren|reconnexion|connexion en cours|hors ligne|pas de connexion|connexion perdue|sem conex[aã]o|conex[aã]o perdida|กำลังเชื่อมต่อใหม่|กำลังเชื่อมต่อ|ออฟไลน์|ไม่มีการเชื่อมต่อ|再接続中|接続中|オフライン)\.{0,3}$/i;
+export function _isReconnectText(value) {
+  return RECONNECT_TEXT_PATTERN.test(String(value || '').trim());
+}
 
-  const state = await evaluate(`
-    (function() {
-      var result = { url: window.location.href, title: document.title };
-      try {
-        var chart = window.TradingViewApi._activeChartWidgetWV.value();
-        result.symbol = chart.symbol();
-        result.resolution = chart.resolution();
-        result.chartType = chart.chartType();
-        result.apiAvailable = true;
-      } catch(e) {
-        result.symbol = 'unknown';
-        result.resolution = 'unknown';
-        result.chartType = null;
-        result.apiAvailable = false;
-        result.apiError = e.message;
+const HEALTH_PROBE_JS = `
+  (function() {
+    function hasFunction(value, name) { return !!value && typeof value[name] === 'function'; }
+    var reconnectText = new RegExp(${JSON.stringify(RECONNECT_TEXT_PATTERN.source)}, 'i');
+    var result = { url: window.location.href, title: document.title, browserOnline: navigator.onLine !== false };
+    var chart = null, widget = null, model = null, inner = null, series = null;
+    try {
+      chart = window.TradingViewApi._activeChartWidgetWV.value();
+      widget = chart._chartWidget;
+      model = widget.model();
+      inner = model.model();
+      series = model.mainSeries();
+      result.symbol = chart.symbol();
+      result.resolution = chart.resolution();
+      result.chartType = chart.chartType();
+      result.apiAvailable = true;
+    } catch(e) {
+      result.symbol = 'unknown';
+      result.resolution = 'unknown';
+      result.chartType = null;
+      result.apiAvailable = false;
+      result.apiError = e.message;
+    }
+
+    var checks = {
+      active_chart: !!chart,
+      chart_symbol: hasFunction(chart, 'symbol'),
+      chart_resolution: hasFunction(chart, 'resolution'),
+      chart_studies: hasFunction(chart, 'getAllStudies'),
+      chart_widget_model: hasFunction(widget, 'model'),
+      main_series: !!series,
+      main_series_bars: hasFunction(series, 'bars'),
+      model_data_sources: hasFunction(inner, 'dataSources')
+    };
+    var missing = [];
+    Object.keys(checks).forEach(function(name) { if (!checks[name]) missing.push(name); });
+    var ua = navigator.userAgent || '';
+    var versionMatch = ua.match(/TVDesktop\\/([0-9.]+)/) || ua.match(/TradingView\\/([0-9.]+)/);
+    result.compatibility = {
+      compatible: missing.length === 0,
+      checks: checks,
+      missing: missing,
+      desktop_version: versionMatch ? versionMatch[1] : null
+    };
+
+    var feedConnected = null;
+    var disconnectCount = null;
+    try {
+      var feed = window.ChartApiInstance;
+      if (feed && typeof feed.connected === 'function') feedConnected = !!feed.connected();
+      else if (feed && typeof feed._isConnected === 'boolean') feedConnected = feed._isConnected;
+      if (feed && typeof feed.disconnectCount === 'function') disconnectCount = feed.disconnectCount();
+      else if (feed && typeof feed._disconnectCount === 'number') disconnectCount = feed._disconnectCount;
+    } catch(e) {}
+
+    var seriesStatus = null;
+    var seriesStatusError = null;
+    try {
+      if (series && typeof series.status === 'function') seriesStatus = series.status();
+      if (series && typeof series.isStatusError === 'function') seriesStatusError = !!series.isStatusError();
+    } catch(e) {}
+
+    var reconnectIndicator = false;
+    try {
+      var nodes = document.querySelectorAll('[role="alert"], [role="status"], [data-name], [class*="toast"], [class*="notification"]');
+      for (var i = 0; i < nodes.length && i < 500; i++) {
+        var node = nodes[i];
+        if (!(node.offsetWidth || node.offsetHeight || node.getClientRects().length)) continue;
+        var text = (node.textContent || '').trim();
+        if (reconnectText.test(text)) {
+          reconnectIndicator = true;
+          break;
+        }
       }
-      return result;
-    })()
-  `);
+      if (!reconnectIndicator && document.body) {
+        var lines = (document.body.innerText || '').slice(0, 200000).split('\\n');
+        for (var j = 0; j < lines.length; j++) {
+          if (reconnectText.test(lines[j].trim())) {
+            reconnectIndicator = true;
+            break;
+          }
+        }
+      }
+    } catch(e) {}
 
+    var feedState = 'unknown';
+    if (!result.browserOnline) feedState = 'offline';
+    else if (reconnectIndicator) feedState = 'reconnecting';
+    else if (feedConnected === false) feedState = 'disconnected';
+    else if (feedConnected === true && seriesStatusError !== true) feedState = 'connected';
+    else if (seriesStatusError === true) feedState = 'series_error';
+    result.datafeed = {
+      state: feedState,
+      connected: feedConnected,
+      browser_online: result.browserOnline,
+      reconnect_indicator: reconnectIndicator,
+      disconnect_count: disconnectCount,
+      series_status: seriesStatus,
+      series_status_error: seriesStatusError
+    };
+    return result;
+  })()
+`;
+
+function _healthDeps(overrides) {
+  return {
+    getClient: overrides?.getClient || getClient,
+    getTargetInfo: overrides?.getTargetInfo || getTargetInfo,
+    evaluate: overrides?.evaluate || evaluate,
+  };
+}
+
+export async function healthCheck({ _deps } = {}) {
+  const deps = _healthDeps(_deps);
+  await deps.getClient();
+  const target = await deps.getTargetInfo();
+
+  const state = await deps.evaluate(HEALTH_PROBE_JS);
+
+  let targetUrl = '';
+  try {
+    const parsed = new URL(target.url);
+    // Layout/chart IDs in /chart/<id>/ are stable account-linked identifiers;
+    // health needs the route, not the identifier.
+    const pathname = parsed.pathname.replace(/^\/chart\/[^/]+\/?/, '/chart/');
+    targetUrl = `${parsed.origin}${pathname}`;
+  } catch (_) { /* malformed target URL */ }
+  const warnings = [];
+  if (!state?.apiAvailable) warnings.push('TradingView chart API is unavailable.');
+  if (state?.compatibility?.compatible === false) warnings.push(`Required TradingView APIs missing: ${state.compatibility.missing.join(', ')}`);
+  if (state?.datafeed?.state && state.datafeed.state !== 'connected') warnings.push(`TradingView market data state is ${state.datafeed.state}.`);
+  const healthy = !!state?.apiAvailable
+    && state?.compatibility?.compatible === true
+    && state?.datafeed?.state === 'connected';
   return {
     success: true,
+    healthy,
+    status: healthy ? 'healthy' : 'degraded',
     cdp_connected: true,
-    target_id: target.id,
-    target_url: target.url,
+    target_url: targetUrl,
     target_title: target.title,
     chart_symbol: state?.symbol || 'unknown',
     chart_resolution: state?.resolution || 'unknown',
     chart_type: state?.chartType ?? null,
     api_available: state?.apiAvailable ?? false,
+    datafeed: state?.datafeed || { state: 'unknown' },
+    compatibility: state?.compatibility || { compatible: false, missing: ['health_probe_failed'] },
+    ...(warnings.length > 0 ? { warnings } : {}),
   };
 }
 
-export async function discover() {
-  const paths = await evaluate(`
+export async function compatibilityCheck({ _deps } = {}) {
+  const deps = _healthDeps(_deps);
+  await deps.getClient();
+  const state = await deps.evaluate(HEALTH_PROBE_JS);
+  return {
+    success: true,
+    ...(state?.compatibility || { compatible: false, checks: {}, missing: ['health_probe_failed'], desktop_version: null }),
+    datafeed_probe_available: state?.datafeed?.connected !== null && state?.datafeed?.connected !== undefined,
+  };
+}
+
+export async function discover({ _deps } = {}) {
+  const deps = _healthDeps(_deps);
+  const paths = await deps.evaluate(`
     (function() {
       var results = {};
+      function methodsOf(value, limit) {
+        var methods = [], seen = {}, current = value;
+        for (var depth = 0; current && depth < 6; depth++, current = Object.getPrototypeOf(current)) {
+          var names = [];
+          try { names = Object.getOwnPropertyNames(current); } catch(e) {}
+          for (var i = 0; i < names.length; i++) {
+            var name = names[i];
+            if (seen[name]) continue;
+            seen[name] = true;
+            try { if (typeof value[name] === 'function') methods.push(name); } catch(e) {}
+          }
+        }
+        methods.sort();
+        var hash = 2166136261;
+        var signatureInput = methods.join('\\n');
+        for (var h = 0; h < signatureInput.length; h++) {
+          hash ^= signatureInput.charCodeAt(h);
+          hash = Math.imul(hash, 16777619);
+        }
+        return { count: methods.length, methods: methods.slice(0, limit), signature: ('00000000' + (hash >>> 0).toString(16)).slice(-8) };
+      }
       try {
         var chart = window.TradingViewApi._activeChartWidgetWV.value();
-        var methods = [];
-        for (var k in chart) { if (typeof chart[k] === 'function') methods.push(k); }
-        results.chartApi = { available: true, path: 'window.TradingViewApi._activeChartWidgetWV.value()', methodCount: methods.length, methods: methods.slice(0, 50) };
+        var chartMethods = methodsOf(chart, 50);
+        results.chartApi = { available: true, path: 'window.TradingViewApi._activeChartWidgetWV.value()', methodCount: chartMethods.count, method_signature: chartMethods.signature, methods: chartMethods.methods };
       } catch(e) { results.chartApi = { available: false, error: e.message }; }
       try {
         var col = window.TradingViewApi._chartWidgetCollection;
-        var colMethods = [];
-        for (var k in col) { if (typeof col[k] === 'function') colMethods.push(k); }
-        results.chartWidgetCollection = { available: !!col, path: 'window.TradingViewApi._chartWidgetCollection', methodCount: colMethods.length, methods: colMethods.slice(0, 30) };
+        var colMethods = methodsOf(col, 30);
+        results.chartWidgetCollection = { available: !!col, path: 'window.TradingViewApi._chartWidgetCollection', methodCount: colMethods.count, method_signature: colMethods.signature, methods: colMethods.methods };
       } catch(e) { results.chartWidgetCollection = { available: false, error: e.message }; }
       try {
         var ws = window.ChartApiInstance;
-        var wsMethods = [];
-        for (var k in ws) { if (typeof ws[k] === 'function') wsMethods.push(k); }
-        results.chartApiInstance = { available: !!ws, path: 'window.ChartApiInstance', methodCount: wsMethods.length, methods: wsMethods.slice(0, 30) };
+        var wsMethods = methodsOf(ws, 30);
+        results.chartApiInstance = { available: !!ws, path: 'window.ChartApiInstance', methodCount: wsMethods.count, method_signature: wsMethods.signature, methods: wsMethods.methods };
       } catch(e) { results.chartApiInstance = { available: false, error: e.message }; }
       try {
         var bwb = window.TradingView && window.TradingView.bottomWidgetBar;
-        var bwbMethods = [];
-        if (bwb) { for (var k in bwb) { if (typeof bwb[k] === 'function') bwbMethods.push(k); } }
-        results.bottomWidgetBar = { available: !!bwb, path: 'window.TradingView.bottomWidgetBar', methodCount: bwbMethods.length, methods: bwbMethods.slice(0, 20) };
+        var bwbMethods = methodsOf(bwb, 20);
+        results.bottomWidgetBar = { available: !!bwb, path: 'window.TradingView.bottomWidgetBar', methodCount: bwbMethods.count, method_signature: bwbMethods.signature, methods: bwbMethods.methods };
       } catch(e) { results.bottomWidgetBar = { available: false, error: e.message }; }
       try {
         var replay = window.TradingViewApi._replayApi;
@@ -89,6 +239,100 @@ export async function discover() {
   return { success: true, apis_available: available, apis_total: total, apis: paths };
 }
 
+const COMPATIBILITY_DIR = join(homedir(), '.tv-mcp', 'compatibility');
+const MAX_COMPATIBILITY_BASELINES = 20;
+
+function _compatibilitySurface(discovery) {
+  const result = {};
+  for (const [name, api] of Object.entries(discovery?.apis || {})) {
+    result[name] = {
+      available: !!api?.available,
+      method_count: api?.methodCount ?? null,
+      method_signature: api?.method_signature ?? null,
+    };
+  }
+  return result;
+}
+
+export async function compatibilitySnapshot({ action = 'compare', overwrite = false, _deps } = {}) {
+  const dir = _deps?.dir || COMPATIBILITY_DIR;
+  const read = _deps?.readFileSync || readFileSync;
+  const write = _deps?.writeFileSync || writeFileSync;
+  const rename = _deps?.renameSync || renameSync;
+  const mkdir = _deps?.mkdirSync || mkdirSync;
+  const listDir = _deps?.readdirSync || readdirSync;
+  const stat = _deps?.statSync || statSync;
+  const unlink = _deps?.unlinkSync || unlinkSync;
+  const getCompatibility = _deps?.compatibilityCheck || (() => compatibilityCheck({ _deps }));
+  const getDiscovery = _deps?.discover || (() => discover({ _deps }));
+
+  if (action === 'list') {
+    let files = [];
+    try { files = listDir(dir).filter((name) => name.endsWith('.json')).sort(); } catch (_) {}
+    return { success: true, count: files.length, versions: files.map((name) => name.slice(0, -5)) };
+  }
+  if (action !== 'compare' && action !== 'record') {
+    throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'compatibility snapshot action must be compare, record, or list');
+  }
+
+  const [compatibility, discovery] = await Promise.all([getCompatibility(), getDiscovery()]);
+  const version = String(compatibility.desktop_version || 'unknown').replace(/[^0-9A-Za-z._-]/g, '_').slice(0, 80);
+  const file = join(dir, `${version}.json`);
+  const current = {
+    schema_version: 1,
+    recorded_at: new Date().toISOString(),
+    desktop_version: compatibility.desktop_version || null,
+    critical: {
+      compatible: compatibility.compatible,
+      checks: compatibility.checks || {},
+      missing: compatibility.missing || [],
+    },
+    surfaces: _compatibilitySurface(discovery),
+  };
+
+  let baseline = null;
+  try { baseline = JSON.parse(read(file, 'utf8')); } catch (_) {}
+  const surface_drift = [];
+  if (baseline) {
+    for (const [name, surface] of Object.entries(current.surfaces)) {
+      const prior = baseline.surfaces?.[name];
+      if (!prior || prior.available !== surface.available || prior.method_count !== surface.method_count || prior.method_signature !== surface.method_signature) {
+        surface_drift.push({ name, baseline: prior || null, current: surface });
+      }
+    }
+  }
+
+  if (action === 'record') {
+    if (baseline && !overwrite) {
+      return { success: true, recorded: false, reason: 'baseline_exists', file, desktop_version: compatibility.desktop_version, surface_drift };
+    }
+    mkdir(dir, { recursive: true });
+    const tmp = `${file}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
+    write(tmp, JSON.stringify(current, null, 2));
+    rename(tmp, file);
+    // Desktop versions are low-cardinality, but bound the directory anyway so
+    // malformed/dev builds cannot grow local state forever.
+    try {
+      const files = listDir(dir)
+        .filter((name) => name.endsWith('.json'))
+        .map((name) => ({ name, mtime: stat(join(dir, name)).mtimeMs }))
+        .sort((a, b) => b.mtime - a.mtime);
+      for (const old of files.slice(MAX_COMPATIBILITY_BASELINES)) unlink(join(dir, old.name));
+    } catch (_) { /* pruning is best-effort; the recorded baseline remains valid */ }
+    return { success: true, recorded: true, file, desktop_version: compatibility.desktop_version };
+  }
+
+  return {
+    success: true,
+    baseline_found: !!baseline,
+    file,
+    desktop_version: compatibility.desktop_version,
+    critical_compatible: compatibility.compatible,
+    critical_missing: compatibility.missing || [],
+    surface_drift,
+  };
+}
+
 export async function uiState() {
   const state = await evaluate(`
     (function() {
@@ -106,7 +350,9 @@ export async function uiState() {
       ui.buttons = {};
       var btns = document.querySelectorAll('button');
       var seen = {};
+      var emitted = 0;
       for (var i = 0; i < btns.length; i++) {
+        if (emitted >= 100) break;
         var b = btns[i];
         if (b.offsetParent === null || b.offsetWidth < 15) continue;
         var text = b.textContent.trim();
@@ -114,6 +360,7 @@ export async function uiState() {
         var dn = b.getAttribute('data-name') || '';
         var label = text || aria || dn;
         if (!label || label.length > 60) continue;
+        if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(label)) label = '[redacted email]';
         var key = label.replace(/[^a-zA-Z0-9 ]/g, '').substring(0, 40);
         if (seen[key]) continue;
         seen[key] = true;
@@ -126,7 +373,10 @@ export async function uiState() {
         else if (rect.y > 750) region = 'bottom_bar';
         if (!ui.buttons[region]) ui.buttons[region] = [];
         ui.buttons[region].push({ label: label.substring(0, 40), disabled: b.disabled, x: Math.round(rect.x), y: Math.round(rect.y) });
+        emitted++;
       }
+      ui.button_count = emitted;
+      ui.buttons_truncated = btns.length > emitted && emitted >= 100;
       ui.key_buttons = {};
       var keyLabels = {
         'add_to_chart': /add to chart/i, 'save_and_add': /save and add/i,
@@ -160,25 +410,117 @@ export async function uiState() {
   return { success: true, ...state };
 }
 
-export async function launch({ port, kill_existing } = {}) {
-  const cdpPort = port || 9222;
-  const killFirst = kill_existing !== false;
-  const platform = process.platform;
+const WINDOWS_APPS_RE = /\\WindowsApps\\/i;
+
+async function _probeCdp(cdpPort) {
+  const http = await import('http');
+  return new Promise((resolve) => {
+    const req = http.get(`http://${CDP_HOST}:${cdpPort}/json/version`, (res) => {
+      let data = '';
+      res.on('data', (chunk) => { data += chunk; });
+      res.on('end', () => resolve(data));
+    });
+    req.on('error', () => resolve(null));
+    req.setTimeout(2000, () => { req.destroy(); resolve(null); });
+  });
+}
+
+function _resolveLaunchDeps(deps) {
+  return {
+    platform: deps?.platform || process.platform,
+    localAppData: deps?.localAppData ?? process.env.LOCALAPPDATA ?? '',
+    home: deps?.home ?? process.env.HOME ?? '',
+    programFiles: deps?.programFiles ?? process.env.PROGRAMFILES ?? '',
+    programFilesX86: deps?.programFilesX86 ?? process.env['PROGRAMFILES(X86)'] ?? '',
+    spawn: deps?.spawn || spawn,
+    execFileSync: deps?.execFileSync || execFileSync,
+    existsSync: deps?.existsSync || existsSync,
+    cpSync: deps?.cpSync || cpSync,
+    rmSync: deps?.rmSync || rmSync,
+    readdirSync: deps?.readdirSync || readdirSync,
+    mkdirSync: deps?.mkdirSync || mkdirSync,
+    delay: deps?.delay || ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
+    probeCdp: deps?.probeCdp || _probeCdp,
+    spawnFailedEarly: deps?.spawnFailedEarly || _spawnFailedEarly,
+  };
+}
+
+function _spawnDetached(spawnFn, executable, args) {
+  const child = spawnFn(executable, args, { detached: true, stdio: 'ignore' });
+  child.unref();
+  return child;
+}
+
+function _spawnFailedEarly(child, graceMs = 1500) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => { cleanup(); resolve(null); }, graceMs);
+    const onError = (error) => { cleanup(); resolve(error.code || error.message || 'spawn error'); };
+    const onExit = (code) => { cleanup(); resolve(`exited immediately (code ${code})`); };
+    const cleanup = () => {
+      clearTimeout(timer);
+      child.off?.('error', onError);
+      child.off?.('exit', onExit);
+    };
+    child.on('error', onError);
+    child.on('exit', onExit);
+  });
+}
+
+async function _waitForCdp({ cdpPort, attempts, delay, probeCdp }) {
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    await delay(1000);
+    try {
+      const value = await probeCdp(cdpPort);
+      if (value) return typeof value === 'string' ? JSON.parse(value) : value;
+    } catch (_) { /* retry */ }
+  }
+  return null;
+}
+
+function _copyMsixPackageLocal(tvPath, deps) {
+  const pathApi = deps.platform === 'win32' ? pathWin32 : { dirname, basename, join };
+  const sourceDir = pathApi.dirname(tvPath);
+  const packageName = pathApi.basename(sourceDir);
+  const cacheRoot = pathApi.join(deps.localAppData, 'tvcontrol', 'desktop-cache');
+  const destinationDir = pathApi.join(cacheRoot, packageName);
+  const destinationExe = pathApi.join(destinationDir, 'TradingView.exe');
+  if (!deps.existsSync(destinationExe)) {
+    deps.mkdirSync(cacheRoot, { recursive: true });
+    try {
+      for (const entry of deps.readdirSync(cacheRoot)) {
+        if (entry !== packageName && /^TradingView\./i.test(entry)) {
+          deps.rmSync(pathApi.join(cacheRoot, entry), { recursive: true, force: true });
+        }
+      }
+    } catch (_) { /* empty cache */ }
+    deps.cpSync(sourceDir, destinationDir, { recursive: true });
+  }
+  return destinationExe;
+}
+
+export async function launch({ port, kill_existing, _deps } = {}) {
+  const deps = _resolveLaunchDeps(_deps);
+  const cdpPort = port || CDP_PORT;
+  // Killing a user's running Desktop session is destructive (unsaved Pine,
+  // layouts, and dialogs can be lost). Require explicit opt-in instead of
+  // making process termination the default side effect of a health command.
+  const killFirst = kill_existing === true;
+  const platform = deps.platform;
 
   const pathMap = {
     darwin: [
       '/Applications/TradingView.app/Contents/MacOS/TradingView',
-      `${process.env.HOME}/Applications/TradingView.app/Contents/MacOS/TradingView`,
+      `${deps.home}/Applications/TradingView.app/Contents/MacOS/TradingView`,
     ],
     win32: [
-      `${process.env.LOCALAPPDATA}\\TradingView\\TradingView.exe`,
-      `${process.env.PROGRAMFILES}\\TradingView\\TradingView.exe`,
-      `${process.env['PROGRAMFILES(X86)']}\\TradingView\\TradingView.exe`,
+      `${deps.localAppData}\\TradingView\\TradingView.exe`,
+      `${deps.programFiles}\\TradingView\\TradingView.exe`,
+      `${deps.programFilesX86}\\TradingView\\TradingView.exe`,
     ],
     linux: [
       '/opt/TradingView/tradingview',
       '/opt/TradingView/TradingView',
-      `${process.env.HOME}/.local/share/TradingView/TradingView`,
+      `${deps.home}/.local/share/TradingView/TradingView`,
       '/usr/bin/tradingview',
       '/snap/tradingview/current/tradingview',
     ],
@@ -187,7 +529,19 @@ export async function launch({ port, kill_existing } = {}) {
   let tvPath = null;
   const candidates = pathMap[platform] || pathMap.linux;
   for (const p of candidates) {
-    if (p && existsSync(p)) { tvPath = p; break; }
+    if (p && deps.existsSync(p)) { tvPath = p; break; }
+  }
+
+  if (!tvPath && platform === 'win32') {
+    try {
+      const installDir = deps.execFileSync('powershell', [
+        '-NoProfile',
+        '-Command',
+        "(Get-AppxPackage -Name 'TradingView.Desktop' -ErrorAction SilentlyContinue).InstallLocation",
+      ], { timeout: 5000 }).toString().trim();
+      const candidate = installDir ? `${installDir}\\TradingView.exe` : '';
+      if (candidate && deps.existsSync(candidate)) tvPath = candidate;
+    } catch (_) { /* not an MSIX install */ }
   }
 
   if (!tvPath) {
@@ -198,8 +552,8 @@ export async function launch({ port, kill_existing } = {}) {
       // makes future maintainers' interpolation mistakes a non-issue.
       const cmd = platform === 'win32' ? 'where' : 'which';
       const arg = platform === 'win32' ? 'TradingView.exe' : 'tradingview';
-      tvPath = execFileSync(cmd, [arg], { timeout: 3000 }).toString().trim().split('\n')[0];
-      if (tvPath && !existsSync(tvPath)) tvPath = null;
+      tvPath = deps.execFileSync(cmd, [arg], { timeout: 3000 }).toString().trim().split('\n')[0];
+      if (tvPath && !deps.existsSync(tvPath)) tvPath = null;
     } catch { /* ignore */ }
   }
 
@@ -207,11 +561,11 @@ export async function launch({ port, kill_existing } = {}) {
     try {
       // mdfind with no shell pipe — take the first line in JS instead of
       // `| head -1`. Same outcome, no shell interpretation.
-      const raw = execFileSync('mdfind', ['kMDItemFSName == TradingView.app'], { timeout: 5000 }).toString();
+      const raw = deps.execFileSync('mdfind', ['kMDItemFSName == TradingView.app'], { timeout: 5000 }).toString();
       const found = raw.split('\n').map(s => s.trim()).find(Boolean);
       if (found) {
         const candidate = `${found}/Contents/MacOS/TradingView`;
-        if (existsSync(candidate)) tvPath = candidate;
+        if (deps.existsSync(candidate)) tvPath = candidate;
       }
     } catch { /* ignore */ }
   }
@@ -224,70 +578,62 @@ export async function launch({ port, kill_existing } = {}) {
     );
   }
 
-  if (killFirst) {
+  const killExisting = async () => {
     try {
       if (platform === 'win32') {
-        execFileSync('taskkill', ['/F', '/IM', 'TradingView.exe'], { timeout: 5000 });
+        deps.execFileSync('taskkill', ['/F', '/IM', 'TradingView.exe'], { timeout: 5000 });
       } else {
         // -x: exact process-name match. -f matches the full command line, so
         // any process whose path or args contained "TradingView" — including
         // the MCP server itself when running from a directory named
         // .../TradingView/... — would be killed too. -x scopes to the
         // binary name only.
-        execFileSync('pkill', ['-x', 'TradingView'], { timeout: 5000 });
+        deps.execFileSync('pkill', ['-x', 'TradingView'], { timeout: 5000 });
       }
-      await new Promise(r => setTimeout(r, 1500));
+      await deps.delay(1500);
     } catch { /* may not be running */ }
+  };
+  if (killFirst) await killExisting();
+
+  const args = [`--remote-debugging-port=${cdpPort}`];
+  let child = _spawnDetached(deps.spawn, tvPath, args);
+  let info = null;
+  let usedLocalCopy = false;
+
+  if (platform === 'win32' && WINDOWS_APPS_RE.test(tvPath)) {
+    const earlyFailure = await deps.spawnFailedEarly(child);
+    if (!earlyFailure) {
+      info = await _waitForCdp({ cdpPort, attempts: 15, delay: deps.delay, probeCdp: deps.probeCdp });
+    }
+    if (!info) {
+      const localExecutable = _copyMsixPackageLocal(tvPath, deps);
+      await killExisting();
+      child = _spawnDetached(deps.spawn, localExecutable, args);
+      tvPath = localExecutable;
+      usedLocalCopy = true;
+    }
+  } else {
+    const earlyFailure = await deps.spawnFailedEarly(child);
+    if (earlyFailure) {
+      throw new ClassifiedError(CATEGORIES.TV_NOT_RUNNING, `TradingView failed during startup: ${earlyFailure}`);
+    }
   }
 
-  const child = spawn(tvPath, [`--remote-debugging-port=${cdpPort}`], { detached: true, stdio: 'ignore' });
-  // Track exit so we can distinguish "binary crashed at startup" from "slow
-  // to open" in the poll loop below. Without this, both cases reach the
-  // 15s timeout and return success:true with a "cdp_ready: false" warning
-  // — caller can't tell which.
-  let childExited = false;
-  let childExitInfo = null;
-  child.on('exit', (code, signal) => {
-    childExited = true;
-    childExitInfo = { code, signal };
-  });
-  child.on('error', (err) => {
-    childExited = true;
-    childExitInfo = { error: err.message };
-  });
-  child.unref();
-
-  const http = await import('http');
-  for (let i = 0; i < 15; i++) {
-    await new Promise(r => setTimeout(r, 1000));
-    if (childExited) {
-      throw new ClassifiedError(
-        CATEGORIES.TV_NOT_RUNNING,
-        `TradingView exited during startup: ${JSON.stringify(childExitInfo)}`,
-        { hint: 'Binary launched but quit before opening the CDP port. Try running it manually to see the failure mode.' },
-      );
-    }
-    try {
-      const ready = await new Promise((resolve) => {
-        http.get(`http://localhost:${cdpPort}/json/version`, (res) => {
-          let data = '';
-          res.on('data', (chunk) => data += chunk);
-          res.on('end', () => resolve(data));
-        }).on('error', () => resolve(null));
-      });
-      if (ready) {
-        const info = JSON.parse(ready);
-        return {
-          success: true, platform, binary: tvPath, pid: child.pid,
-          cdp_port: cdpPort, cdp_url: `http://localhost:${cdpPort}`,
-          browser: info.Browser, user_agent: info['User-Agent'],
-        };
-      }
-    } catch { /* retry */ }
+  if (!info) {
+    info = await _waitForCdp({ cdpPort, attempts: 15, delay: deps.delay, probeCdp: deps.probeCdp });
+  }
+  if (info) {
+    return {
+      success: true, platform, binary: tvPath, pid: child.pid,
+      cdp_port: cdpPort, cdp_url: `http://${CDP_HOST}:${cdpPort}`,
+      browser: info.Browser, user_agent: info['User-Agent'],
+      ...(usedLocalCopy ? { msix_local_copy: true } : {}),
+    };
   }
 
   return {
-    success: true, platform, binary: tvPath, pid: child.pid, cdp_port: cdpPort, cdp_ready: false,
+    success: false, platform, binary: tvPath, pid: child.pid, cdp_port: cdpPort, cdp_ready: false,
+    ...(usedLocalCopy ? { msix_local_copy: true } : {}),
     warning: 'TradingView launched but CDP not responding yet. It may still be loading. Try tv_health_check in a few seconds.',
   };
 }

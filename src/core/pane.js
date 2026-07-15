@@ -4,8 +4,32 @@
  */
 import { evaluate, evaluateAsync, getClient, safeString } from '../connection.js';
 import { ClassifiedError, CATEGORIES } from '../errors.js';
+import { strictResolve } from './_resolve.js';
 
 const CWC = 'window.TradingViewApi._chartWidgetCollection';
+const _PANE_DEPS = new Set(['evaluate', 'evaluateAsync', 'wait']);
+
+function _resolve(deps) {
+  strictResolve(deps, _PANE_DEPS);
+  return {
+    evaluate,
+    evaluateAsync,
+    wait: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    ...deps,
+  };
+}
+
+function _paneIndex(index) {
+  const value = Number(index);
+  if (!Number.isInteger(value) || value < 0) {
+    throw new ClassifiedError(
+      CATEGORIES.INVALID_ARGUMENT,
+      `Pane index must be a non-negative integer; received ${JSON.stringify(index)}`,
+      { hint: 'Run pane_list and pass one of its zero-based pane indexes.' },
+    );
+  }
+  return value;
+}
 
 const LAYOUT_NAMES = {
   's': '1 chart',
@@ -31,8 +55,9 @@ const LAYOUT_NAMES = {
 /**
  * List all panes in the current layout with their symbols and index.
  */
-export async function list() {
-  const result = await evaluate(`
+export async function list({ _deps } = {}) {
+  const deps = _resolve(_deps);
+  const result = await deps.evaluate(`
     (function() {
       var cwc = ${CWC};
       var layoutType = cwc._layoutType;
@@ -80,7 +105,11 @@ export async function list() {
  * Set the chart layout grid.
  * @param {string} layout - Layout code: s, 2h, 2v, 2-1, 1-2, 3h, 3v, 4, 6, 8, etc.
  */
-export async function setLayout({ layout }) {
+export async function setLayout({ layout, _deps } = {}) {
+  const deps = _resolve(_deps);
+  if (typeof layout !== 'string' || !layout.trim()) {
+    throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'layout is required');
+  }
   const code = layout.toLowerCase().replace(/\s+/g, '');
 
   // Map friendly names to codes
@@ -101,10 +130,10 @@ export async function setLayout({ layout }) {
     );
   }
 
-  await evaluateAsync(`${CWC}.setLayout(${safeString(resolved)})`);
-  await new Promise(r => setTimeout(r, 500));
+  await deps.evaluateAsync(`${CWC}.setLayout(${safeString(resolved)})`);
+  await deps.wait(500);
 
-  const state = await list();
+  const state = await list({ _deps });
   return {
     success: true,
     layout: resolved,
@@ -117,9 +146,10 @@ export async function setLayout({ layout }) {
 /**
  * Focus a specific pane by index.
  */
-export async function focus({ index }) {
-  const idx = Number(index);
-  const result = await evaluate(`
+export async function focus({ index, _deps } = {}) {
+  const idx = _paneIndex(index);
+  const deps = _resolve(_deps);
+  const result = await deps.evaluate(`
     (function() {
       var cwc = ${CWC};
       var all = cwc.getAll();
@@ -131,7 +161,7 @@ export async function focus({ index }) {
     })()
   `);
 
-  if (result?.error) throw new ClassifiedError(CATEGORIES.API_UNEXPECTED, result.error);
+  if (result?.error) throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, result.error);
   return { success: true, focused_index: result.focused, total_panes: result.total };
 }
 
@@ -139,23 +169,26 @@ export async function focus({ index }) {
  * Set the symbol on a specific pane by index.
  * Works by focusing the pane, then using the active chart's setSymbol.
  */
-export async function setSymbol({ index, symbol }) {
-  const idx = Number(index);
+export async function setSymbol({ index, symbol, _deps } = {}) {
+  const idx = _paneIndex(index);
+  const cleanSymbol = String(symbol || '').trim();
+  if (!cleanSymbol) throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'symbol is required');
+  const deps = _resolve(_deps);
 
   // Focus the target pane first
-  await focus({ index: idx });
-  await new Promise(r => setTimeout(r, 300));
+  await focus({ index: idx, _deps });
+  await deps.wait(300);
 
   // Now set symbol on the now-active chart
-  await evaluateAsync(`
+  await deps.evaluateAsync(`
     (function() {
       var chart = window.TradingViewApi._activeChartWidgetWV.value();
       return new Promise(function(resolve) {
-        chart.setSymbol(${safeString(symbol)}, {});
+        chart.setSymbol(${safeString(cleanSymbol)}, {});
         setTimeout(resolve, 500);
       });
     })()
   `);
 
-  return { success: true, index: idx, symbol };
+  return { success: true, index: idx, symbol: cleanSymbol };
 }

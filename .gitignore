@@ -4,6 +4,7 @@ scripts/current.pine
 temp_*
 *.log
 discovery-log.json
+rules.json
 .ijfw/
 .planning/
 ijfw/

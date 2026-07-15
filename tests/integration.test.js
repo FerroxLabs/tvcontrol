@@ -20,6 +20,7 @@ import { registerTabTools } from '../src/tools/tab.js';
 import { registerStateTools } from '../src/tools/state.js';
 import { registerSweepTools } from '../src/tools/sweep.js';
 import { registerVisionTools } from '../src/tools/vision.js';
+import { discoverToolCatalog } from '../src/core/capabilities.js';
 
 function mockServer() {
   const tools = [];
@@ -205,5 +206,43 @@ describe('MCP tool registration — integration', () => {
     const names = server._tools.map(t => t.name);
     const unique = new Set(names);
     assert.equal(names.length, unique.size, 'duplicate tool names: ' + JSON.stringify(names.filter((n, i) => names.indexOf(n) !== i)));
+  });
+
+  it('production registration and capability catalog cover the same default tools', () => {
+    const server = mockServer();
+    registerHealthTools(server);
+    registerChartTools(server);
+    registerPineTools(server);
+    registerDataTools(server);
+    registerCaptureTools(server);
+    registerDrawingTools(server);
+    registerAlertTools(server);
+    registerBatchTools(server);
+    registerReplayTools(server);
+    registerIndicatorTools(server);
+    registerWatchlistTools(server);
+    registerUiTools(server);
+    registerPaneTools(server);
+    registerTabTools(server);
+    registerStateTools(server);
+    registerSweepTools(server);
+    registerVisionTools(server);
+    const registered = server._tools.map((tool) => tool.name).sort();
+    const catalog = discoverToolCatalog().filter((name) => name !== 'ui_evaluate').sort();
+    assert.deepEqual(registered, catalog);
+  });
+
+  it('production server invokes every tool-group registrar used by integration tests', async () => {
+    const { readFileSync } = await import('node:fs');
+    const source = readFileSync(new URL('../src/server.js', import.meta.url), 'utf8');
+    const registrars = [
+      'registerHealthTools', 'registerChartTools', 'registerPineTools', 'registerDataTools',
+      'registerCaptureTools', 'registerDrawingTools', 'registerAlertTools', 'registerBatchTools',
+      'registerReplayTools', 'registerIndicatorTools', 'registerWatchlistTools', 'registerUiTools',
+      'registerPaneTools', 'registerTabTools', 'registerStateTools', 'registerSweepTools', 'registerVisionTools',
+    ];
+    for (const registrar of registrars) {
+      assert.match(source, new RegExp(`${registrar}\\(server\\)`), `${registrar} is tested but missing from production server registration`);
+    }
   });
 });

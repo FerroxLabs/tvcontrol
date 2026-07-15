@@ -3,7 +3,7 @@ import { _arg } from '../_arg.js';
 import * as core from '../../core/chart.js';
 import * as healthCore from '../../core/health.js';
 
-register('state', {
+register('chart-state', {
   description: 'Get current chart state (symbol, TF, studies)',
   handler: () => core.getState(),
 });

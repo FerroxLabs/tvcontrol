@@ -13,6 +13,7 @@ import { getOhlcv, getStrategyResults } from './data.js';
 import { writeFileSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { ClassifiedError, CATEGORIES } from '../errors.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SCREENSHOT_DIR = join(dirname(dirname(__dirname)), 'screenshots');
@@ -30,50 +31,95 @@ async function _captureScreenshot(symbol, tf) {
   return { file_path: filePath, size_bytes: data.length };
 }
 
-export async function batchRun({ symbols, timeframes, action, delay_ms, ohlcv_count }) {
+function _resolve(deps) {
+  return {
+    getChartState: deps?.getChartState || chart.getState,
+    setSymbol: deps?.setSymbol || chart.setSymbol,
+    setTimeframe: deps?.setTimeframe || chart.setTimeframe,
+    waitForChartReady: deps?.waitForChartReady || waitForChartReady,
+    getOhlcv: deps?.getOhlcv || getOhlcv,
+    getStrategyResults: deps?.getStrategyResults || getStrategyResults,
+    captureScreenshot: deps?.captureScreenshot || _captureScreenshot,
+    sleep: deps?.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
+  };
+}
+
+export async function batchRun({ symbols, timeframes, action, delay_ms, ohlcv_count, entity_id, restore_start_state = true, _deps }) {
   if (!VALID_ACTIONS.has(action)) {
-    return {
-      success: false,
-      error: `Unknown action: ${action}. Valid: ${[...VALID_ACTIONS].join(', ')}`,
-      category: 'invalid_argument',
-    };
+    throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, `Unknown action: ${action}. Valid: ${[...VALID_ACTIONS].join(', ')}`);
+  }
+  if (!Array.isArray(symbols) || symbols.length === 0 || symbols.length > 100 || symbols.some((value) => typeof value !== 'string' || value.trim().length === 0 || value.length > 120)) {
+    throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'symbols must contain 1-100 non-empty symbol strings (max 120 characters each)');
+  }
+  if (timeframes !== undefined && (!Array.isArray(timeframes) || timeframes.length > 20 || timeframes.some((value) => typeof value !== 'string' || value.trim().length === 0 || value.length > 20))) {
+    throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'timeframes must contain at most 20 non-empty strings (max 20 characters each)');
   }
   const tfs = timeframes && timeframes.length > 0 ? timeframes : [null];
   const delay = delay_ms ?? 2000;
+  if (!Number.isInteger(delay) || delay < 0 || delay > 60000) {
+    throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'delay_ms must be an integer from 0 to 60000');
+  }
+  if (symbols.length * tfs.length > 500) {
+    throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'batch is limited to 500 symbol/timeframe combinations');
+  }
+  if (action === 'get_strategy_results' && entity_id !== undefined && (typeof entity_id !== 'string' || entity_id.length === 0 || entity_id.length > 200)) {
+    throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'entity_id must be a non-empty string no longer than 200 characters');
+  }
+
+  const deps = _resolve(_deps);
   const results = [];
+  const original = restore_start_state ? await deps.getChartState({ _deps }) : null;
+  let restoredStartState = !restore_start_state;
+  let restoreError = null;
 
-  for (const symbol of symbols) {
-    for (const tf of tfs) {
-      const combo = { symbol, timeframe: tf };
-      try {
-        await chart.setSymbol({ symbol });
-        if (tf) await chart.setTimeframe({ timeframe: tf });
+  try {
+    for (const symbol of symbols) {
+      for (const tf of tfs) {
+        const combo = { symbol, timeframe: tf };
+        try {
+          await deps.setSymbol({ symbol, _deps });
+          if (tf) await deps.setTimeframe({ timeframe: tf, _deps });
 
-        // waitForChartReady tolerates brief transitions; the explicit delay
-        // gives downstream reads a chance to pick up fresh bars/studies.
-        await waitForChartReady(symbol);
-        await new Promise((r) => setTimeout(r, delay));
+          // waitForChartReady returns false on timeout. Treat that as an
+          // iteration failure so a stale chart can never be reported as fresh.
+          // The explicit delay gives downstream reads a chance to pick up
+          // newly rendered bars/studies after readiness is confirmed.
+          const ready = await deps.waitForChartReady(symbol, tf);
+          if (!ready) {
+            throw new ClassifiedError(
+              CATEGORIES.CHART_LOADING,
+              `Chart did not finish loading ${symbol}${tf ? ` at ${tf}` : ''}`,
+            );
+          }
+          await deps.sleep(delay);
 
-        let actionResult;
-        if (action === 'screenshot') {
-          actionResult = await _captureScreenshot(symbol, tf);
-        } else if (action === 'get_ohlcv') {
-          // Use the direct-bars path (same as data_get_ohlcv). Returns a
-          // summary with open/close/high/low/change and last_5_bars.
-          actionResult = await getOhlcv({ count: ohlcv_count, summary: true });
-        } else if (action === 'get_strategy_results') {
-          // Uses the internal-API finder (post-fix) that correctly locates
-          // overlay strategies and reports from reportData().performance.all.
-          actionResult = await getStrategyResults();
+          let actionResult;
+          if (action === 'screenshot') {
+            actionResult = await deps.captureScreenshot(symbol, tf);
+          } else if (action === 'get_ohlcv') {
+            actionResult = await deps.getOhlcv({ count: ohlcv_count, summary: true, _deps });
+          } else if (action === 'get_strategy_results') {
+            actionResult = await deps.getStrategyResults({ entity_id, _deps });
+          }
+          results.push({ ...combo, success: true, result: actionResult });
+        } catch (err) {
+          results.push({
+            ...combo,
+            success: false,
+            error: err.message,
+            category: err.category,
+          });
         }
-        results.push({ ...combo, success: true, result: actionResult });
+      }
+    }
+  } finally {
+    if (restore_start_state && original?.symbol && original?.resolution) {
+      try {
+        await deps.setSymbol({ symbol: original.symbol, _deps });
+        await deps.setTimeframe({ timeframe: original.resolution, _deps });
+        restoredStartState = true;
       } catch (err) {
-        results.push({
-          ...combo,
-          success: false,
-          error: err.message,
-          category: err.category,
-        });
+        restoreError = { error: err.message, category: err.category || CATEGORIES.API_UNEXPECTED };
       }
     }
   }
@@ -87,6 +133,8 @@ export async function batchRun({ symbols, timeframes, action, delay_ms, ohlcv_co
     total_iterations: results.length,
     successful: successCount,
     failed: results.length - successCount,
+    restored_start_state: restoredStartState,
+    ...(restoreError ? { restore_error: restoreError } : {}),
     results,
   };
 }

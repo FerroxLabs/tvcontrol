@@ -3,11 +3,15 @@ import { ClassifiedError, CATEGORIES } from './errors.js';
 import { readFileSync, writeFileSync, mkdirSync, renameSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
+import { acquireFileLock } from './core/coordination.js';
 
 let client = null;
 let targetInfo = null;
-const CDP_HOST = 'localhost';
-const CDP_PORT = 9222;
+// Electron commonly binds the debug port on IPv4 only. Keep both variables
+// configurable for non-default and containerized setups, and export them so
+// every CDP consumer uses the same endpoint.
+export const CDP_HOST = process.env.TV_CDP_HOST || process.env.CDP_HOST || '127.0.0.1';
+export const CDP_PORT = Number(process.env.TV_CDP_PORT || process.env.CDP_PORT) || 9222;
 const MAX_RETRIES = 5;
 const BASE_DELAY = 500;
 
@@ -18,6 +22,9 @@ const BASE_DELAY = 500;
 // unaffected by /json/activate. Writing the selected id here lets findChartTarget
 // honor the user's last switch across separate processes.
 const ACTIVE_TARGET_FILE = join(homedir(), '.tv-mcp', 'active-target.json');
+const CONNECT_LOCK_FILE = join(homedir(), '.tv-mcp', 'connect.lock');
+const CLIENT_LIVENESS_TIMEOUT_MS = 3000;
+const CDP_HTTP_TIMEOUT_MS = 5000;
 function _readActiveTargetId() {
   try {
     const raw = readFileSync(ACTIVE_TARGET_FILE, 'utf8');
@@ -107,7 +114,12 @@ export function requireFinite(value, name) {
 export function _looksLikeDisconnect(err) {
   const msg = (err?.message || '').toLowerCase();
   const code = err?.code || '';
-  if (code === 'ECONNREFUSED' || code === 'ECONNRESET' || code === 'EPIPE') return true;
+  const causeMsg = (err?.cause?.message || '').toLowerCase();
+  const causeCode = err?.cause?.code || '';
+  if (
+    code === 'ECONNREFUSED' || code === 'ECONNRESET' || code === 'EPIPE' || code === 'ETIMEDOUT'
+    || causeCode === 'ECONNREFUSED' || causeCode === 'ECONNRESET' || causeCode === 'EPIPE' || causeCode === 'ETIMEDOUT'
+  ) return true;
   // In-page JS throws are surfaced by evaluate() as "JS evaluation error: ...".
   // Their text routinely contains disconnect-shaped words ("Order closed",
   // "connection aborted") that must NOT be misread as a dead transport — the
@@ -115,14 +127,81 @@ export function _looksLikeDisconnect(err) {
   // the regression: it dropped the client and re-picked a target, silently
   // switching the user's tab. Isolate page throws before the heuristic.
   if (msg.startsWith('js evaluation error:')) return false;
-  return /closed|disconnect|websocket|socket hang up|ws closed|inspector|connection|aborted|not connected/i.test(msg);
+  return /closed|disconnect|websocket|socket hang up|ws closed|inspector|connection|aborted|not connected/i.test(`${msg} ${causeMsg}`);
+}
+
+export async function _withConnectionTimeout(promise, ms, label = 'CDP operation') {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const error = new Error(`${label} timed out after ${ms}ms`);
+      error.code = 'ETIMEDOUT';
+      reject(error);
+    }, ms);
+  });
+  promise.catch?.(() => {});
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Best-effort cross-process mutex around CDP connection establishment.
+ * CLI commands run in separate Node processes; without this lock a Desktop
+ * restart can make all of them hit /json/list and open WebSockets together.
+ * The token check prevents an expired owner from deleting a successor's lock.
+ */
+export async function _acquireProcessConnectLock({
+  lockFile = CONNECT_LOCK_FILE,
+  waitMs = 8000,
+  staleMs = 60000,
+  now = () => Date.now(),
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  random = Math.random,
+} = {}) {
+  return acquireFileLock({
+    lockFile,
+    purpose: 'cdp-connect',
+    waitMs,
+    staleMs,
+    heartbeatMs: 10000,
+    failOnTimeout: false,
+    now,
+    sleep,
+    random,
+  });
+}
+
+export async function fetchCdpResponse(path, {
+  timeoutMs = CDP_HTTP_TIMEOUT_MS,
+  fetchImpl = globalThis.fetch,
+  ...fetchOptions
+} = {}) {
+  if (typeof path !== 'string' || !path.startsWith('/')) {
+    throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'CDP path must start with /');
+  }
+  return fetchImpl(`http://${CDP_HOST}:${CDP_PORT}${path}`, {
+    ...fetchOptions,
+    signal: fetchOptions.signal || globalThis.AbortSignal.timeout(timeoutMs),
+  });
+}
+
+export async function _fetchCdpJson(path, options = {}) {
+  const response = await fetchCdpResponse(path, options);
+  if (!response.ok) {
+    throw new ClassifiedError(CATEGORIES.CDP_DISCONNECTED, `CDP HTTP ${response.status} for ${path}`);
+  }
+  return response.json();
 }
 
 export async function getClient() {
   if (client) {
     try {
       // Quick liveness check
-      await client.Runtime.evaluate({ expression: '1', returnByValue: true });
+      const liveness = client.Runtime.evaluate({ expression: '1', returnByValue: true });
+      await _withConnectionTimeout(liveness, CLIENT_LIVENESS_TIMEOUT_MS, 'CDP liveness check');
       return client;
     } catch (err) {
       if (!_looksLikeDisconnect(err)) {
@@ -150,7 +229,17 @@ let _connectInFlight = null;
 
 export async function connect() {
   if (_connectInFlight) return _connectInFlight;
-  _connectInFlight = _connect();
+  _connectInFlight = (async () => {
+    let release = () => {};
+    try {
+      release = await _acquireProcessConnectLock();
+    } catch (_) { /* read-only homes must not make CDP unusable */ }
+    try {
+      return await _connect();
+    } finally {
+      release();
+    }
+  })();
   try {
     return await _connectInFlight;
   } finally {
@@ -229,8 +318,7 @@ export function _isTradingViewUrl(url) {
 }
 
 async function findChartTarget() {
-  const resp = await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/list`);
-  const targets = await resp.json();
+  const targets = await _fetchCdpJson('/json/list');
   // If the user previously selected a tab (via tab_switch), honor it —
   // /json/list order is stable and doesn't reflect /json/activate, so
   // without this pref the CLI would always re-pick tab 0. Re-check the
@@ -329,8 +417,7 @@ export async function reconnectToTarget(targetId) {
   }
   // Find the target by id (we don't use findChartTarget here because the
   // user may have switched to a non-chart tab — caller chose the id).
-  const resp = await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/list`);
-  const targets = await resp.json();
+  const targets = await _fetchCdpJson('/json/list');
   const target = targets.find((t) => t.id === targetId);
   if (!target) {
     throw new ClassifiedError(

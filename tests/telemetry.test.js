@@ -19,6 +19,11 @@ import {
 
 import { instrument } from '../src/tools/_format.js';
 
+it('does not claim process signal ownership from ordinary CLI commands', () => {
+  const source = readFileSync(new URL('../src/core/telemetry.js', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /process\.on\(['"]SIG(?:INT|TERM)['"]/);
+});
+
 // --- helpers ----------------------------------------------------------------
 
 function withEnv(vars, fn) {
@@ -83,6 +88,7 @@ describe('shouldLog()', () => {
   it('tv_health_check is excluded by default', () => {
     withEnv({ TV_MCP_TELEMETRY: '1', TV_MCP_TELEMETRY_INCLUDE: undefined, TV_MCP_TELEMETRY_EXCLUDE: undefined }, () => {
       assert.equal(shouldLog('tv_health_check'), false);
+      assert.equal(shouldLog('tv_compatibility_check'), false);
     });
   });
 

@@ -5,7 +5,7 @@
  * Outputs JSON to stdout. Errors to stderr.
  * Exit codes: 0 success, 1 error, 2 connection failure.
  *
- * All 88 MCP tools are accessible via CLI commands.
+ * CLI counterparts expose the same core chart-control capabilities.
  * Pipe-friendly: every command outputs JSON for use with jq.
  */
 
@@ -28,6 +28,7 @@ import './commands/stream.js';
 import './commands/state.js';
 import './commands/sweep.js';
 import './commands/log.js';
+import './commands/reliability.js';
 
 // Run
 import { run } from './router.js';

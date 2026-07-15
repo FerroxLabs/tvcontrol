@@ -107,7 +107,7 @@ describe('exportTo()', () => {
   it('writes JSON to a tmp path', async () => {
     const filePath = join(TMP, 'export-test.json');
     const { _deps } = scriptedDeps({}, [
-      // get() calls evaluate once for the DOM scrape
+      { opened: false, ready: true },
       { symbols: [{ symbol: 'AAPL' }, { symbol: 'MSFT' }], source: 'data_attributes' },
     ]);
     const result = await exportTo({ file_path: filePath, _deps });
@@ -202,6 +202,7 @@ describe('importFrom()', () => {
 
     // get() returns AAPL already present
     const { _deps, evaluate } = scriptedDeps({}, [
+      { opened: false, ready: true },
       { symbols: [{ symbol: 'AAPL' }], source: 'data_attributes' },
     ]);
 
@@ -210,8 +211,8 @@ describe('importFrom()', () => {
     assert.equal(result.dry_run, true);
     assert.deepEqual(result.would_add, ['TSLA']);
     assert.deepEqual(result.would_skip, ['AAPL']);
-    // No mutation calls beyond get()
-    assert.equal(evaluate.calls.length, 1);
+    // No mutation calls beyond readiness + get().
+    assert.equal(evaluate.calls.length, 2);
   });
 
   it('mode=merge adds symbols not already present', async () => {
@@ -233,8 +234,9 @@ describe('importFrom()', () => {
       },
     };
     const { _deps, evaluate } = scriptedDeps({}, [
+      { opened: false, ready: true },
       { symbols: [{ symbol: 'AAPL' }], source: 'data_attributes' }, // get() — AAPL already present
-      { opened: false },     // add() panel state check
+      { opened: false, ready: true }, // add() watchlist readiness
       [],                     // add() before-set (empty from evaluate's perspective)
       { found: true },        // add() addClicked
       ['NVDA'],               // add() after-set — NVDA was added

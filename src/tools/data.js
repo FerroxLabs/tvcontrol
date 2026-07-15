@@ -18,25 +18,30 @@ export function registerDataTools(server) {
     catch (err) { return errorResult(err); }
   });
 
-  server.tool('data_get_strategy_results', 'Get strategy performance metrics from Strategy Tester', {}, async () => {
-    try { return jsonResult(await core.getStrategyResults()); }
+  server.tool('data_get_strategy_results', 'Get strategy performance metrics. Pass entity_id when more than one strategy is loaded. Auto-opens Strategy Tester and unhides the selected strategy so TradingView computes its report.', {
+    entity_id: z.string().optional().describe('Exact strategy entity ID from chart_get_state. Strongly recommended when more than one strategy is loaded.'),
+  }, async ({ entity_id }) => {
+    try { return jsonResult(await core.getStrategyResults({ entity_id })); }
     catch (err) { return errorResult(err); }
   });
 
-  server.tool('data_get_trades', 'Get trade list from Strategy Tester', {
+  server.tool('data_get_trades', 'Get the most recent strategy orders. Pass entity_id when more than one strategy is loaded. Auto-opens Strategy Tester and unhides the selected strategy.', {
     max_trades: z.coerce.number().int().min(1).max(20).optional().describe('Maximum trades to return (1-20, default 20)'),
-  }, async ({ max_trades }) => {
-    try { return jsonResult(await core.getTrades({ max_trades })); }
+    entity_id: z.string().optional().describe('Exact strategy entity ID from chart_get_state. Strongly recommended when more than one strategy is loaded.'),
+  }, async ({ max_trades, entity_id }) => {
+    try { return jsonResult(await core.getTrades({ max_trades, entity_id })); }
     catch (err) { return errorResult(err); }
   });
 
-  server.tool('data_get_equity', 'Get equity curve data from Strategy Tester', {}, async () => {
-    try { return jsonResult(await core.getEquity()); }
+  server.tool('data_get_equity', 'Get equity curve data from Strategy Tester. Pass entity_id when more than one strategy is loaded.', {
+    entity_id: z.string().optional().describe('Exact strategy entity ID from chart_get_state. Strongly recommended when more than one strategy is loaded.'),
+  }, async ({ entity_id }) => {
+    try { return jsonResult(await core.getEquity({ entity_id })); }
     catch (err) { return errorResult(err); }
   });
 
-  server.tool('quote_get', 'Get real-time quote data for a symbol (price, OHLC, volume)', {
-    symbol: z.string().optional().describe('Symbol to quote (blank = current chart symbol)'),
+  server.tool('quote_get', 'Get quote data. A different symbol briefly switches the chart, serializes concurrent quote calls, and restores the original chart.', {
+    symbol: z.string().optional().describe('Symbol to quote (blank = current chart). Non-blank values cause a temporary chart switch and restore.'),
   }, async ({ symbol }) => {
     try { return jsonResult(await core.getQuote({ symbol })); }
     catch (err) { return errorResult(err); }

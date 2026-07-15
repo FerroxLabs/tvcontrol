@@ -3,7 +3,7 @@ import { _arg } from '../_arg.js';
 import * as core from '../../core/watchlist.js';
 
 register('watchlist', {
-  description: 'Watchlist tools (get, add, remove, export, import)',
+  description: 'Watchlist tools (get, add, add-bulk, remove, export, import)',
   subcommands: new Map([
     ['get', {
       description: 'Get watchlist symbols',
@@ -17,6 +17,14 @@ register('watchlist', {
         return core.add({ symbol: positionals[0] });
       },
     }],
+    ['add-bulk', {
+      description: 'Add multiple symbols to the watchlist',
+      usage: '<symbol> [symbol ...]',
+      handler: (opts, positionals) => {
+        _arg(positionals.length, 'Symbols required. Usage: tv watchlist add-bulk AAPL MSFT');
+        return core.addBulk({ symbols: positionals });
+      },
+    }],
     ['remove', {
       description: 'Remove a symbol from the watchlist',
       usage: '<symbol> | --symbol <symbol>',
@@ -24,9 +32,9 @@ register('watchlist', {
         symbol: { type: 'string', short: 's', description: 'Symbol to remove (alternate form)' },
       },
       handler: (opts, positionals) => {
-        const symbol = positionals?.[0] || opts.symbol;
-        _arg(symbol, 'Symbol required. Usage: tv watchlist remove AAPL');
-        return core.remove({ symbol });
+        const symbols = positionals.length ? positionals : (opts.symbol ? [opts.symbol] : []);
+        _arg(symbols.length, 'Symbol required. Usage: tv watchlist remove AAPL [MSFT ...]');
+        return symbols.length === 1 ? core.remove({ symbol: symbols[0] }) : core.removeBulk({ symbols });
       },
     }],
     ['export', {

@@ -24,8 +24,12 @@ export function registerUiTools(server) {
     catch (err) { return errorResult(err); }
   });
 
-  server.tool('layout_list', 'List saved chart layouts', {}, async () => {
-    try { return jsonResult(await core.layoutList()); }
+  server.tool('layout_list', 'List saved chart layouts with bounded pagination', {
+    limit: z.coerce.number().int().min(1).max(100).optional().default(50),
+    offset: z.coerce.number().int().min(0).optional().default(0),
+    include_details: z.coerce.boolean().optional().default(false).describe('Include symbol, resolution, and modification metadata'),
+  }, async ({ limit, offset, include_details }) => {
+    try { return jsonResult(await core.layoutList({ limit, offset, include_details })); }
     catch (err) { return errorResult(err); }
   });
 

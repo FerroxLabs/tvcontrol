@@ -371,9 +371,10 @@ export function analyze({ source }) {
   };
 }
 
-export async function check({ source }) {
+export async function check({ source, _deps } = {}) {
   const formData = new URLSearchParams();
   formData.append('source', source);
+  const fetchImpl = _deps?.fetch || globalThis.fetch;
 
   // NOTE: this is a host-side Guest fetch, not an authenticated
   // in-page call. Deliberate tradeoff: it keeps `pine_check` working with
@@ -384,18 +385,28 @@ export async function check({ source }) {
   // fix both but requires TV running and a live-verified response shape — not
   // changed blind. If you add an authenticated path, keep this Guest fetch as a
   // fallback so offline checks still work.
-  const response = await fetch(
-    'https://pine-facade.tradingview.com/pine-facade/translate_light?user_name=Guest&pine_id=00000000-0000-0000-0000-000000000000',
-    {
-      method: 'POST',
-      headers: {
-        'Accept': 'application/json',
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'Referer': 'https://www.tradingview.com/',
-      },
-      body: formData,
-    }
-  );
+  let response;
+  try {
+    response = await fetchImpl(
+      'https://pine-facade.tradingview.com/pine-facade/translate_light?user_name=Guest&pine_id=00000000-0000-0000-0000-000000000000',
+      {
+        method: 'POST',
+        headers: {
+          'Accept': 'application/json',
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Referer': 'https://www.tradingview.com/',
+        },
+        body: formData,
+        signal: globalThis.AbortSignal.timeout(15_000),
+      }
+    );
+  } catch (err) {
+    throw new ClassifiedError(
+      CATEGORIES.API_UNEXPECTED,
+      `TradingView Pine compile request failed: ${err?.name === 'TimeoutError' ? 'timed out after 15000ms' : err.message}`,
+      { cause: err, hint: 'Check network access to pine-facade.tradingview.com and retry.' },
+    );
+  }
 
   if (!response.ok) {
     throw new ClassifiedError(

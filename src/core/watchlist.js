@@ -13,21 +13,59 @@ function _resolve(deps) {
   return {
     evaluate: deps?.evaluate || _evaluate,
     getClient: deps?.getClient || _getClient,
+    wait: deps?.wait || ((ms) => new Promise((r) => setTimeout(r, ms))),
   };
 }
 
+const WATCHLIST_BUTTON_JS = `(document.querySelector('[data-name="base-watchlist-widget-button"]')
+  || document.querySelector('[data-name="base"]')
+  || document.querySelector('[aria-label="Watchlist, details, and news"]')
+  || document.querySelector('[aria-label^="Watchlist"]'))`;
+
+async function _ensureWatchlistOpen(evaluate, wait, maxWaitMs = 5000) {
+  const state = await evaluate(`
+    (function() {
+      var btn = ${WATCHLIST_BUTTON_JS};
+      if (!btn) return { error: 'Watchlist button not found' };
+      var right = document.querySelector('[class*="layout__area--right"]');
+      var open = !!(right && right.offsetWidth > 50);
+      var ready = open && !!(document.querySelector('[data-name="add-symbol-button"]')
+        || right.querySelector('[data-symbol-full]'));
+      if (ready) return { opened: false, ready: true };
+      if (!open) btn.click();
+      return { opened: !open, ready: false };
+    })()
+  `);
+  if (state?.error) {
+    throw new ClassifiedError(CATEGORIES.TV_UI_CHANGED, state.error, {
+      hint: 'TradingView changed the Watchlist control. Open it manually and run tv discover before retrying.',
+    });
+  }
+  if (state?.ready) return state;
+
+  const deadline = Date.now() + maxWaitMs;
+  while (Date.now() < deadline) {
+    const ready = await evaluate(`
+      (function() {
+        var right = document.querySelector('[class*="layout__area--right"]');
+        return !!(right && right.offsetWidth > 50
+          && (document.querySelector('[data-name="add-symbol-button"]') || right.querySelector('[data-symbol-full]')));
+      })()
+    `);
+    if (ready) return { opened: !!state?.opened, ready: true };
+    await wait(250);
+  }
+  throw new ClassifiedError(CATEGORIES.CHART_LOADING, 'Watchlist panel did not become ready within 5 seconds', {
+    hint: 'Confirm a watchlist is selected in the right sidebar, then retry.',
+  });
+}
+
 export async function get({ _deps } = {}) {
-  const { evaluate } = _resolve(_deps);
-  // Try internal API first — reads from the active watchlist widget
+  const { evaluate, wait } = _resolve(_deps);
+  await _ensureWatchlistOpen(evaluate, wait);
   const symbols = await evaluate(`
     (function() {
-      // Method 1: Try the watchlist widget's internal data
-      try {
-        var rightArea = document.querySelector('[class*="layout__area--right"]');
-        if (!rightArea || rightArea.offsetWidth < 50) return { symbols: [], source: 'panel_closed' };
-      } catch(e) {}
-
-      // Method 2: Read data-symbol-full attributes from watchlist rows
+      function norm(t) { return String(t || '').replace(/\\u2212/g, '-').trim(); }
       var results = [];
       var seen = {};
       var container = document.querySelector('[class*="layout__area--right"]');
@@ -43,15 +81,20 @@ export async function get({ _deps } = {}) {
         // Find the row and extract price data
         var row = symbolEls[i].closest('[class*="row"]') || symbolEls[i].parentElement;
         var cells = row ? row.querySelectorAll('[class*="cell"], [class*="column"]') : [];
-        var nums = [];
+        var texts = [];
         for (var j = 0; j < cells.length; j++) {
-          var t = cells[j].textContent.trim();
-          if (t && /^[\\-+]?[\\d,]+\\.?\\d*%?$/.test(t.replace(/[\\s,]/g, ''))) nums.push(t);
+          texts.push(norm(cells[j].textContent));
         }
-        results.push({ symbol: sym, last: nums[0] || null, change: nums[1] || null, change_percent: nums[2] || null });
+        results.push({
+          symbol: sym,
+          last: texts[1] || null,
+          change: texts[2] || null,
+          change_percent: texts[3] || null,
+          volume: texts[4] || null,
+        });
       }
 
-      if (results.length > 0) return { symbols: results, source: 'data_attributes' };
+      if (results.length > 0) return { symbols: results, source: 'dom_rows' };
 
       // Method 3: Scan for ticker-like text in the right panel
       var items = container.querySelectorAll('[class*="symbolName"], [class*="tickerName"], [class*="symbol-"]');
@@ -122,29 +165,9 @@ async function _currentSymbolsSet(evaluate) {
 }
 
 export async function add({ symbol, _deps }) {
-  const { evaluate, getClient } = _resolve(_deps);
+  const { evaluate, getClient, wait } = _resolve(_deps);
   const c = await getClient();
-
-  // First ensure watchlist panel is open
-  const panelState = await evaluate(`
-    (function() {
-      var btn = document.querySelector('[data-name="base-watchlist-widget-button"]')
-        || document.querySelector('[aria-label*="Watchlist"]');
-      if (!btn) return { error: 'Watchlist button not found' };
-      var isActive = btn.getAttribute('aria-pressed') === 'true'
-        || btn.classList.toString().indexOf('Active') !== -1
-        || btn.classList.toString().indexOf('active') !== -1;
-      if (!isActive) { btn.click(); return { opened: true }; }
-      return { opened: false };
-    })()
-  `);
-
-  if (panelState?.error) {
-    throw new ClassifiedError(CATEGORIES.TV_UI_CHANGED, panelState.error, {
-      hint: 'Open the Watchlist panel manually or via ui_open_panel({panel: "watchlist", action: "open"})',
-    });
-  }
-  if (panelState?.opened) await new Promise(r => setTimeout(r, 500));
+  await _ensureWatchlistOpen(evaluate, wait);
 
   const before = await _currentSymbolsSet(evaluate);
 
@@ -218,6 +241,30 @@ export async function add({ symbol, _deps }) {
     );
   }
   return { success: true, action: 'added', requested_symbol: symbol, stored_symbol: added[0], added_count: added.length };
+}
+
+export async function addBulk({ symbols, _deps }) {
+  if (!Array.isArray(symbols) || symbols.length === 0) {
+    throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'symbols must be a non-empty array');
+  }
+  const added = [];
+  const errors = [];
+  for (const symbol of [...new Set(symbols.map((value) => String(value).trim()).filter(Boolean))]) {
+    try {
+      const result = await add({ symbol, _deps });
+      added.push({ symbol, stored_symbol: result.stored_symbol });
+    } catch (error) {
+      errors.push({ symbol, error: error.message, category: error.category || CATEGORIES.API_UNEXPECTED });
+    }
+  }
+  return {
+    success: errors.length === 0,
+    requested_count: symbols.length,
+    added_count: added.length,
+    error_count: errors.length,
+    added,
+    errors,
+  };
 }
 
 export async function remove({ symbol, _deps }) {
@@ -308,6 +355,30 @@ export async function remove({ symbol, _deps }) {
     );
   }
   return { success: true, action: 'removed', requested_symbol: symbol, stored_symbol: resolved, method };
+}
+
+export async function removeBulk({ symbols, _deps }) {
+  if (!Array.isArray(symbols) || symbols.length === 0) {
+    throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'symbols must be a non-empty array');
+  }
+  const removed = [];
+  const errors = [];
+  for (const symbol of [...new Set(symbols.map((value) => String(value).trim()).filter(Boolean))]) {
+    try {
+      const result = await remove({ symbol, _deps });
+      removed.push({ symbol, stored_symbol: result.stored_symbol, method: result.method });
+    } catch (error) {
+      errors.push({ symbol, error: error.message, category: error.category || CATEGORIES.API_UNEXPECTED });
+    }
+  }
+  return {
+    success: errors.length === 0,
+    requested_count: symbols.length,
+    removed_count: removed.length,
+    error_count: errors.length,
+    removed,
+    errors,
+  };
 }
 
 function _isUnder(child, parent) {

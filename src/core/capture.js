@@ -2,18 +2,27 @@
  * Core screenshot/capture logic.
  */
 import { getClient, evaluate, getChartCollection } from '../connection.js';
+import { waitForChartRender } from '../wait.js';
 import { writeFileSync, mkdirSync } from 'fs';
-import { join, dirname } from 'path';
-import { fileURLToPath } from 'url';
+import { join } from 'path';
+import { homedir } from 'os';
+import { ClassifiedError, CATEGORIES } from '../errors.js';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const SCREENSHOT_DIR = join(dirname(dirname(__dirname)), 'screenshots');
+const SCREENSHOT_DIR = process.env.TV_MCP_SCREENSHOT_DIR
+  || join(homedir(), '.tv-mcp', 'screenshots');
 
-export async function captureScreenshot({ region, filename, method } = {}) {
+export async function captureScreenshot({ region = 'full', filename, method, wait_for_render = false } = {}) {
   mkdirSync(SCREENSHOT_DIR, { recursive: true });
 
+  if (wait_for_render) {
+    const settled = await waitForChartRender();
+    if (!settled) {
+      throw new ClassifiedError(CATEGORIES.CHART_LOADING, 'Chart did not reach a stable rendered state before screenshot');
+    }
+  }
+
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
-  const fname = (filename || `tv_${region}_${ts}`).replace(/[\/\\]/g, '_');
+  const fname = (filename || `tv_${region}_${ts}`).replace(/[\/\\]/g, '_').replace(/\.\./g, '_');
   const filePath = join(SCREENSHOT_DIR, `${fname}.png`);
 
   if (method === 'api') {

@@ -182,7 +182,7 @@ Boris Cherny (creator of Claude Code) keeps his team's file around 100 lines. Un
 - Test (all): `npm test` (alias for `npm run test:offline`)
 - Test (single file): `node --test tests/<file>.test.js`
 - Test (E2E live, requires TradingView running): `./examples/verify/run-all.sh`
-- Lint: (not configured)
+- Lint: `npm run lint`
 - Typecheck: (not configured — plain JS)
 - Run locally: `npm start` (MCP stdio) or `npm run tv -- <command>` (CLI)
 
@@ -214,7 +214,7 @@ Prefer single-file test runs during iteration; the full offline suite is for the
 
 When the user corrects your approach, append a one-line rule here before ending the session. Write it concretely ("Always use X for Y"), never abstractly ("be careful with Y"). If an existing line already covers the correction, tighten it instead of adding a new one. Remove lines when the underlying issue goes away (model upgrades, refactors, process changes).
 
-- (empty)
+- Audit and attribution requests are read-only unless the user explicitly authorizes repository edits; never change README, LICENSE, or attribution while only auditing.
 
 ---
 

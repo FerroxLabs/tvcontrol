@@ -11,7 +11,16 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { _isTradingViewUrl, _looksLikeDisconnect } from '../src/connection.js';
+import { mkdtempSync, existsSync, writeFileSync, utimesSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  _isTradingViewUrl,
+  _looksLikeDisconnect,
+  _withConnectionTimeout,
+  _acquireProcessConnectLock,
+  fetchCdpResponse,
+} from '../src/connection.js';
 
 describe('_isTradingViewUrl()', () => {
   it('accepts canonical tradingview.com URLs', () => {
@@ -46,6 +55,8 @@ describe('_looksLikeDisconnect()', () => {
     assert.equal(_looksLikeDisconnect({ code: 'ECONNREFUSED' }), true);
     assert.equal(_looksLikeDisconnect({ code: 'ECONNRESET' }), true);
     assert.equal(_looksLikeDisconnect({ code: 'EPIPE' }), true);
+    assert.equal(_looksLikeDisconnect({ code: 'ETIMEDOUT' }), true);
+    assert.equal(_looksLikeDisconnect({ message: 'fetch failed', cause: { code: 'ECONNREFUSED' } }), true);
   });
 
   it('treats disconnect-shaped messages as disconnects', () => {
@@ -67,5 +78,72 @@ describe('_looksLikeDisconnect()', () => {
     assert.equal(_looksLikeDisconnect({ message: 'something unrelated happened' }), false);
     assert.equal(_looksLikeDisconnect({}), false);
     assert.equal(_looksLikeDisconnect(null), false);
+  });
+});
+
+describe('_withConnectionTimeout()', () => {
+  it('returns a prompt result and clears the timeout', async () => {
+    assert.equal(await _withConnectionTimeout(Promise.resolve(7), 1000), 7);
+  });
+
+  it('bounds a hung renderer liveness probe', async () => {
+    await assert.rejects(
+      () => _withConnectionTimeout(new Promise(() => {}), 20, 'liveness'),
+      (error) => error.code === 'ETIMEDOUT' && /liveness timed out/.test(error.message),
+    );
+  });
+});
+
+describe('fetchCdpResponse()', () => {
+  it('always supplies a bounded abort signal to CDP HTTP calls', async () => {
+    let request;
+    const response = await fetchCdpResponse('/json/list', {
+      timeoutMs: 1234,
+      fetchImpl: async (url, options) => {
+        request = { url, options };
+        return { ok: true };
+      },
+    });
+    assert.equal(response.ok, true);
+    assert.equal(request.url, 'http://127.0.0.1:9222/json/list');
+    assert.ok(request.options.signal);
+  });
+
+  it('rejects non-local path shapes before fetch', async () => {
+    await assert.rejects(() => fetchCdpResponse('https://evil.example/'), /must start with/);
+  });
+});
+
+describe('_acquireProcessConnectLock()', () => {
+  it('serializes owners and releases only its own token', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'tvcontrol-lock-'));
+    const lockFile = join(dir, 'connect.lock');
+    try {
+      const release = await _acquireProcessConnectLock({ lockFile, random: () => 0.5 });
+      assert.equal(existsSync(lockFile), true);
+      const bypass = await _acquireProcessConnectLock({ lockFile, waitMs: 0, random: () => 0.5 });
+      bypass();
+      assert.equal(existsSync(lockFile), true, 'timed-out waiter must not remove the owner lock');
+      release();
+      assert.equal(existsSync(lockFile), false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('recovers a stale lock', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'tvcontrol-stale-lock-'));
+    const lockFile = join(dir, 'connect.lock');
+    try {
+      writeFileSync(lockFile, '{"token":"dead"}');
+      const old = new Date(Date.now() - 120000);
+      utimesSync(lockFile, old, old);
+      const release = await _acquireProcessConnectLock({ lockFile, staleMs: 1000, random: () => 0.5 });
+      assert.equal(existsSync(lockFile), true);
+      release();
+      assert.equal(existsSync(lockFile), false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

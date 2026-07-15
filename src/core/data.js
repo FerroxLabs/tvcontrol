@@ -3,13 +3,15 @@
  */
 import { evaluate, evaluateAsync, KNOWN_PATHS, safeString } from '../connection.js';
 import { ClassifiedError, CATEGORIES } from '../errors.js';
+import { waitForChartReady } from '../wait.js';
 import * as ui from './ui.js';
 import { strictResolve } from './_resolve.js';
 
-const _DATA_DEPS = new Set(['evaluate', 'openPanel', 'wait']);
+const _DATA_DEPS = new Set(['evaluate', 'evaluateAsync', 'openPanel', 'wait', 'waitForChartReady']);
 
 const MAX_OHLCV_BARS = 500;
 const MAX_TRADES = 20;
+const roundPrice = (value) => (value == null ? null : Math.round(value * 1e8) / 1e8);
 // Cap the equity-curve payload. A 1m-over-a-year backtest produces hundreds of
 // thousands of points; serializing that across CDP (returnByValue) can breach
 // V8 string limits / max payload and OOM the Node process. Downsample to at
@@ -17,6 +19,91 @@ const MAX_TRADES = 20;
 const MAX_EQUITY_BARS = 5000;
 const CHART_API = KNOWN_PATHS.chartApi;
 const BARS_PATH = KNOWN_PATHS.mainSeriesBars;
+let _quoteLock = Promise.resolve();
+
+// Shared page-context strategy resolver. TradingView strategies are identified
+// by explicit strategy metadata or their reportData API. In particular,
+// is_price_study is not a reliable discriminator on current Desktop builds.
+const FIND_STRATEGY_JS = `
+  function _strategyIdOf(s) {
+    try {
+      var id = typeof s.id === 'function' ? s.id() : (s.id || s._id);
+      return id === null || id === undefined ? null : String(id);
+    } catch (e) { return null; }
+  }
+  function _reportOf(s) {
+    try {
+      var rd = s.reportData();
+      if (rd && typeof rd.value === 'function') rd = rd.value();
+      return rd;
+    } catch (e) { return null; }
+  }
+  function findStrategies() {
+    var chart = ${CHART_API}._chartWidget;
+    var sources = chart.model().model().dataSources();
+    var strategies = [];
+    for (var i = 0; i < sources.length; i++) {
+      var s = sources[i], mi = null;
+      try { mi = s.metaInfo ? s.metaInfo() : null; } catch (e) {}
+      var isStrat = mi && (mi.isTVScriptStrategy || mi.is_strategy);
+      if ((isStrat || typeof s.reportData === 'function') && typeof s.reportData === 'function') {
+        strategies.push({ s: s, id: _strategyIdOf(s), name: mi ? (mi.description || mi.shortDescription) : null });
+      }
+    }
+    return strategies;
+  }
+  function findStrategy(requestedId) {
+    var strategies = findStrategies();
+    if (requestedId) {
+      for (var i = 0; i < strategies.length; i++) {
+        if (strategies[i].id === String(requestedId)) {
+          return {
+            strat: strategies[i].s,
+            report: _reportOf(strategies[i].s),
+            id: strategies[i].id,
+            name: strategies[i].name,
+            strategy_count: strategies.length
+          };
+        }
+      }
+      return null;
+    }
+    for (var j = 0; j < strategies.length; j++) {
+      var rd = _reportOf(strategies[j].s);
+      if (rd && rd.performance) {
+        return { strat: strategies[j].s, report: rd, id: strategies[j].id, name: strategies[j].name, strategy_count: strategies.length };
+      }
+    }
+    if (strategies.length) {
+      return { strat: strategies[0].s, report: null, id: strategies[0].id, name: strategies[0].name, strategy_count: strategies.length };
+    }
+    return null;
+  }
+  function unhideStrategies(requestedId) {
+    var unhidden = [];
+    var strategies = findStrategies();
+    for (var i = 0; i < strategies.length; i++) {
+      var s = strategies[i].s;
+      if (requestedId && strategies[i].id !== String(requestedId)) continue;
+      try {
+        var visible = null;
+        try { visible = s.properties().visible.value(); } catch (e) {}
+        if (visible !== false) continue;
+        var done = false;
+        try { s.properties().visible.setValue(true); done = true; } catch (e) {}
+        if (!done) {
+          try {
+            var id = typeof s.id === 'function' ? s.id() : s.id;
+            var st = ${CHART_API}.getStudyById(id);
+            if (st) { st.setVisible(true); done = true; }
+          } catch (e) {}
+        }
+        if (done) unhidden.push(strategies[i].name || 'strategy');
+      } catch (e) {}
+    }
+    return unhidden;
+  }
+`;
 
 // Allowlist of (collectionName, mapKey) pairs known to TradingView's internal
 // _primitivesCollection. Both values are interpolated raw into the evaluate
@@ -124,8 +211,8 @@ export async function getOhlcv({ count, summary } = {}) {
       period: { from: first.time, to: last.time },
       open: first.open, close: last.close,
       high: Math.max(...highs), low: Math.min(...lows),
-      range: Math.round((Math.max(...highs) - Math.min(...lows)) * 100) / 100,
-      change: Math.round((last.close - first.open) * 100) / 100,
+      range: roundPrice(Math.max(...highs) - Math.min(...lows)),
+      change: roundPrice(last.close - first.open),
       // Guard the divisor: first.open can legitimately be 0 (some synthetic /
       // crypto instruments) or absent, which would otherwise yield "Infinity%"
       // or "NaN%" and poison any consumer (e.g. chart_vision_read) that parses
@@ -143,8 +230,10 @@ function _resolve(deps) {
   strictResolve(deps, _DATA_DEPS);
   return {
     evaluate,
+    evaluateAsync,
     openPanel: ui.openPanel,
     wait: (ms) => new Promise(r => setTimeout(r, ms)),
+    waitForChartReady,
     ...deps,
   };
 }
@@ -227,25 +316,17 @@ export async function getIndicator({ entity_id, _deps } = {}) {
   }
 }
 
-async function _readStrategyReportData() {
-  return await evaluate(`
+async function _readStrategyReportData(deps, entityId) {
+  return await deps.evaluate(`
     (function() {
+      ${FIND_STRATEGY_JS}
       try {
-        var chart = ${CHART_API}._chartWidget;
-        var sources = chart.model().model().dataSources();
-        // A real Pine strategy uniquely exposes reportData() — non-strategy
-        // sources (Volume, Dividends, etc.) expose performance() but never
-        // reportData(). is_price_study is irrelevant: overlay strategies
-        // report is_price_study: true.
-        var strat = null;
-        for (var i = 0; i < sources.length; i++) {
-          var s = sources[i];
-          if (typeof s.reportData === 'function') { strat = s; break; }
-        }
-        if (!strat) return {metrics: {}, source: 'internal_api', error: 'No strategy found on chart. Add a strategy indicator first.', hasStrategy: false};
+        var requestedId = ${safeString(entityId || '')};
+        var found = findStrategy(requestedId);
+        if (!found) return {metrics: {}, source: 'internal_api', error: requestedId ? 'Requested strategy not found on chart: ' + requestedId : 'No strategy found on chart. Add a strategy indicator first.', hasStrategy: false};
         var metrics = {};
         try {
-          var rd = strat.reportData();
+          var rd = found.report;
           if (rd && typeof rd === 'object') {
             var perf = rd.performance && rd.performance.all;
             if (perf && typeof perf === 'object') {
@@ -265,14 +346,49 @@ async function _readStrategyReportData() {
             if (rd.currency) metrics.currency = rd.currency;
           }
         } catch(e) { return {metrics: {}, source: 'internal_api', error: 'reportData read failed: ' + e.message, hasStrategy: true}; }
-        return {metrics: metrics, source: 'internal_api', hasStrategy: true};
+        return {metrics: metrics, source: 'internal_api', hasStrategy: true, entity_id: found.id, strategy: found.name, strategy_count: found.strategy_count};
       } catch(e) { return {metrics: {}, source: 'internal_api', error: e.message, hasStrategy: false}; }
     })()
   `);
 }
 
-export async function getStrategyResults() {
-  let results = await _readStrategyReportData();
+async function _ensureStrategyTesterReady(deps, entityId, maxWaitMs = 6000) {
+  const unhidden = await deps.evaluate(`
+    (function() {
+      ${FIND_STRATEGY_JS}
+      var requestedId = ${safeString(entityId || '')};
+      try {
+        var bwb = window.TradingView && window.TradingView.bottomWidgetBar;
+        if (bwb && typeof bwb.showWidget === 'function') bwb.showWidget('backtesting');
+      } catch (e) {}
+      return unhideStrategies(requestedId);
+    })()
+  `);
+  const deadline = Date.now() + maxWaitMs;
+  let status = 'timeout';
+  while (Date.now() < deadline) {
+    const ready = await deps.evaluate(`
+      (function() {
+        ${FIND_STRATEGY_JS}
+        var requestedId = ${safeString(entityId || '')};
+        var found = findStrategy(requestedId);
+        if (!found) return 'no-strategy';
+        return found.report && found.report.performance ? 'ready' : 'pending';
+      })()
+    `);
+    if (ready === 'ready' || ready === 'no-strategy') {
+      status = ready;
+      break;
+    }
+    await deps.wait(500);
+  }
+  return { status, unhidden: unhidden || [] };
+}
+
+export async function getStrategyResults({ entity_id, _deps } = {}) {
+  const deps = _resolve(_deps);
+  const ready = await _ensureStrategyTesterReady(deps, entity_id);
+  let results = await _readStrategyReportData(deps, entity_id);
   const metricCount = Object.keys(results?.metrics || {}).length;
 
   // Auto-open the Strategy Tester panel and retry when we found a strategy
@@ -281,14 +397,14 @@ export async function getStrategyResults() {
   // callers (notably strategy_sweep) would think every combo was zero-PnL.
   if (results?.hasStrategy && metricCount === 0 && !results.error) {
     try {
-      await ui.openPanel({ panel: 'strategy-tester', action: 'open' });
-      await new Promise((r) => setTimeout(r, 2000));
-      results = await _readStrategyReportData();
+      await deps.openPanel({ panel: 'strategy-tester', action: 'open' });
+      await deps.wait(2000);
+      results = await _readStrategyReportData(deps, entity_id);
     } catch (_) { /* fall through; we'll surface the empty-metrics path below */ }
   }
 
   if (results?.error) {
-    const isUserState = /no strategy found/i.test(results.error);
+    const isUserState = /no strategy found|requested strategy not found/i.test(results.error);
     throw new ClassifiedError(
       isUserState ? CATEGORIES.STUDY_NOT_FOUND : CATEGORIES.API_UNEXPECTED,
       results.error,
@@ -307,22 +423,36 @@ export async function getStrategyResults() {
     );
   }
 
-  return { success: true, count: finalCount, source: results?.source, metrics: results?.metrics || {} };
+  return {
+    success: true,
+    count: finalCount,
+    source: results?.source,
+    entity_id: results?.entity_id,
+    strategy: results?.strategy,
+    strategy_count: results?.strategy_count,
+    metrics: results?.metrics || {},
+    ...(ready.unhidden.length > 0 && { unhidden_strategies: ready.unhidden }),
+  };
 }
 
-export async function getTrades({ max_trades } = {}) {
-  const limit = Math.min(max_trades || 20, MAX_TRADES);
-  const trades = await evaluate(`
+export async function getTrades({ max_trades, entity_id, _deps } = {}) {
+  const deps = _resolve(_deps);
+  const limit = max_trades == null ? MAX_TRADES : Number(max_trades);
+  if (!Number.isInteger(limit) || limit < 1 || limit > MAX_TRADES) {
+    throw new ClassifiedError(
+      CATEGORIES.INVALID_ARGUMENT,
+      `max_trades must be an integer from 1 to ${MAX_TRADES}.`,
+    );
+  }
+  const ready = await _ensureStrategyTesterReady(deps, entity_id);
+  const trades = await deps.evaluate(`
     (function() {
+      ${FIND_STRATEGY_JS}
       try {
-        var chart = ${CHART_API}._chartWidget;
-        var sources = chart.model().model().dataSources();
-        var strat = null;
-        for (var i = 0; i < sources.length; i++) {
-          var s = sources[i];
-          if (s.metaInfo && s.metaInfo().is_price_study === false && (s.ordersData || s.reportData)) { strat = s; break; }
-        }
-        if (!strat) return {trades: [], source: 'internal_api', error: 'No strategy found on chart.'};
+        var requestedId = ${safeString(entity_id || '')};
+        var found = findStrategy(requestedId);
+        if (!found) return {trades: [], source: 'internal_api', error: requestedId ? 'Requested strategy not found on chart: ' + requestedId : 'No strategy found on chart.'};
+        var strat = found.strat;
         var orders = null;
         if (strat.ordersData) { orders = typeof strat.ordersData === 'function' ? strat.ordersData() : strat.ordersData; if (orders && typeof orders.value === 'function') orders = orders.value(); }
         if (!orders || !Array.isArray(orders)) {
@@ -331,7 +461,8 @@ export async function getTrades({ max_trades } = {}) {
         }
         if (!orders || !Array.isArray(orders)) return {trades: [], source: 'internal_api', error: 'ordersData() returned non-array.'};
         var result = [];
-        for (var t = 0; t < Math.min(orders.length, ${limit}); t++) {
+        var start = Math.max(0, orders.length - ${limit});
+        for (var t = start; t < orders.length; t++) {
           var o = orders[t];
           if (typeof o === 'object' && o !== null) {
             var trade = {};
@@ -340,7 +471,7 @@ export async function getTrades({ max_trades } = {}) {
             result.push(trade);
           }
         }
-        return {trades: result, source: 'internal_api'};
+        return {trades: result, total_orders: orders.length, entity_id: found.id, strategy: found.name, source: 'internal_api'};
       } catch(e) { return {trades: [], source: 'internal_api', error: e.message}; }
     })()
   `);
@@ -348,28 +479,36 @@ export async function getTrades({ max_trades } = {}) {
     // Old contract returned success:true with an embedded `error`, which is
     // indistinguishable from a legitimately flat backtest. Throw so the caller
     // gets a categorized failure (matching getStrategyResults).
-    const noStrategy = /no strategy/i.test(trades.error);
+    const noStrategy = /no strategy|requested strategy not found/i.test(trades.error);
     throw new ClassifiedError(
       noStrategy ? CATEGORIES.STUDY_NOT_FOUND : CATEGORIES.API_UNEXPECTED,
       `getTrades: ${trades.error}`,
       noStrategy ? { hint: 'Load a strategy and open the Strategy Tester panel (ui_open_panel({panel:"strategy-tester", action:"open"})), then retry.' } : undefined,
     );
   }
-  return { success: true, count: trades?.trades?.length || 0, source: trades?.source, trades: trades?.trades || [] };
+  return {
+    success: true,
+    count: trades?.trades?.length || 0,
+    total_orders: trades?.total_orders ?? 0,
+    entity_id: trades?.entity_id,
+    strategy: trades?.strategy,
+    source: trades?.source,
+    trades: trades?.trades || [],
+    ...(ready.unhidden.length > 0 && { unhidden_strategies: ready.unhidden }),
+  };
 }
 
-export async function getEquity() {
-  const equity = await evaluate(`
+export async function getEquity({ entity_id, _deps } = {}) {
+  const deps = _resolve(_deps);
+  const ready = await _ensureStrategyTesterReady(deps, entity_id);
+  const equity = await deps.evaluate(`
     (function() {
+      ${FIND_STRATEGY_JS}
       try {
-        var chart = ${CHART_API}._chartWidget;
-        var sources = chart.model().model().dataSources();
-        var strat = null;
-        for (var i = 0; i < sources.length; i++) {
-          var s = sources[i];
-          if (s.metaInfo && s.metaInfo().is_price_study === false && (s.reportData || s.performance)) { strat = s; break; }
-        }
-        if (!strat) return {data: [], source: 'internal_api', error: 'No strategy found on chart.'};
+        var requestedId = ${safeString(entity_id || '')};
+        var found = findStrategy(requestedId);
+        if (!found) return {data: [], source: 'internal_api', error: requestedId ? 'Requested strategy not found on chart: ' + requestedId : 'No strategy found on chart.'};
+        var strat = found.strat;
         var data = [];
         if (strat.equityData) {
           var eq = typeof strat.equityData === 'function' ? strat.equityData() : strat.equityData;
@@ -401,58 +540,156 @@ export async function getEquity() {
             if (perf && typeof perf.value === 'function') perf = perf.value();
             if (perf && typeof perf === 'object') { var pkeys = Object.keys(perf); for (var p = 0; p < pkeys.length; p++) { if (/equity|drawdown|profit|net/i.test(pkeys[p])) perfData[pkeys[p]] = perf[pkeys[p]]; } }
           }
-          if (Object.keys(perfData).length > 0) return {data: [], equity_summary: perfData, source: 'internal_api', note: 'Full equity curve not available via API; equity summary metrics returned instead.'};
+          if (Object.keys(perfData).length > 0) return {data: [], equity_summary: perfData, entity_id: found.id, strategy: found.name, source: 'internal_api', note: 'Full equity curve not available via API; equity summary metrics returned instead.'};
         }
-        return {data: data, source: 'internal_api'};
+        return {data: data, entity_id: found.id, strategy: found.name, source: 'internal_api'};
       } catch(e) { return {data: [], source: 'internal_api', error: e.message}; }
     })()
   `);
   if (equity?.error) {
-    const noStrategy = /no strategy/i.test(equity.error);
+    const noStrategy = /no strategy|requested strategy not found/i.test(equity.error);
     throw new ClassifiedError(
       noStrategy ? CATEGORIES.STUDY_NOT_FOUND : CATEGORIES.API_UNEXPECTED,
       `getEquity: ${equity.error}`,
       noStrategy ? { hint: 'Load a strategy and open the Strategy Tester panel (ui_open_panel({panel:"strategy-tester", action:"open"})), then retry.' } : undefined,
     );
   }
-  return { success: true, data_points: equity?.data?.length || 0, source: equity?.source, data: equity?.data || [], equity_summary: equity?.equity_summary, note: equity?.note };
+  const hasData = (equity?.data?.length || 0) > 0;
+  const hasSummary = !!(equity?.equity_summary && Object.keys(equity.equity_summary).length > 0);
+  return {
+    success: hasData || hasSummary,
+    complete: hasData,
+    data_points: equity?.data?.length || 0,
+    entity_id: equity?.entity_id,
+    strategy: equity?.strategy,
+    source: equity?.source,
+    data: equity?.data || [],
+    equity_summary: equity?.equity_summary,
+    note: equity?.note || (!hasData ? 'No equity curve was exposed for the selected strategy.' : undefined),
+    ...(ready.unhidden.length > 0 && { unhidden_strategies: ready.unhidden }),
+  };
 }
 
-export async function getQuote({ symbol } = {}) {
-  const data = await evaluate(`
-    (function() {
-      var api = ${CHART_API};
-      var sym = ${safeString(symbol || '')};
-      if (!sym) { try { sym = api.symbol(); } catch(e) {} }
-      if (!sym) { try { sym = api.symbolExt().symbol; } catch(e) {} }
-      var ext = {};
-      try { ext = api.symbolExt() || {}; } catch(e) {}
-      var bars = ${BARS_PATH};
-      var quote = { symbol: sym };
-      if (bars && typeof bars.lastIndex === 'function') {
-        var last = bars.valueAt(bars.lastIndex());
-        if (last) { quote.time = last[0]; quote.open = last[1]; quote.high = last[2]; quote.low = last[3]; quote.close = last[4]; quote.last = last[4]; quote.volume = last[5] || 0; }
+export async function getQuote({ symbol, _deps } = {}) {
+  const deps = _resolve(_deps);
+  const run = _quoteLock.then(() => _getQuoteInternal({ symbol, deps }));
+  _quoteLock = run.then(() => {}, () => {});
+  return run;
+}
+
+async function _getQuoteInternal({ symbol, deps }) {
+  const requested = String(symbol || '').trim();
+  let originalSymbol = null;
+  let needsRestore = false;
+  let quoteResult;
+  let operationError = null;
+  let restoreError = null;
+
+  try {
+    if (requested) {
+      try { originalSymbol = await deps.evaluate(`${CHART_API}.symbol()`); } catch (_) { /* classified below */ }
+      if (!originalSymbol || typeof originalSymbol !== 'string') {
+        throw new ClassifiedError(
+          CATEGORIES.CHART_LOADING,
+          'Cannot switch quote symbols because the starting chart symbol could not be captured',
+        );
       }
+      const normalize = (value) => String(value).trim().toUpperCase();
+      const originalFull = normalize(originalSymbol);
+      const requestedFull = normalize(requested);
+      const bothQualified = originalFull.includes(':') && requestedFull.includes(':');
+      const sameSymbol = originalFull === requestedFull
+        || (!bothQualified && originalFull.split(':').pop() === requestedFull.split(':').pop());
+      if (!sameSymbol) {
+        needsRestore = true;
+        await deps.evaluateAsync(`
+          (function() {
+            var chart = ${CHART_API};
+            return new Promise(function(resolve) {
+              chart.setSymbol(${safeString(requested)}, {});
+              setTimeout(resolve, 500);
+            });
+          })()
+        `);
+        const ready = await deps.waitForChartReady(requested);
+        if (!ready) throw new ClassifiedError(CATEGORIES.CHART_LOADING, `Quote symbol ${requested} did not finish loading`);
+      }
+    }
+
+    const data = await deps.evaluate(`
+      (function() {
+        var api = ${CHART_API};
+        var sym = '';
+        try { sym = api.symbol(); } catch(e) {}
+        if (!sym) { try { sym = api.symbolExt().symbol; } catch(e) {} }
+        var ext = {};
+        try { ext = api.symbolExt() || {}; } catch(e) {}
+        var bars = ${BARS_PATH};
+        var quote = { symbol: sym };
+        if (bars && typeof bars.lastIndex === 'function') {
+          var last = bars.valueAt(bars.lastIndex());
+          if (last) { quote.time = last[0]; quote.open = last[1]; quote.high = last[2]; quote.low = last[3]; quote.close = last[4]; quote.last = last[4]; quote.volume = last[5] || 0; }
+        }
+        try {
+          var bidEl = document.querySelector('[class*="bid"] [class*="price"], [class*="dom-"] [class*="bid"]');
+          var askEl = document.querySelector('[class*="ask"] [class*="price"], [class*="dom-"] [class*="ask"]');
+          if (bidEl) { var bidV = parseFloat(bidEl.textContent.replace(/[^0-9.\\-]/g, '')); if (!isNaN(bidV)) quote.bid = bidV; }
+          if (askEl) { var askV = parseFloat(askEl.textContent.replace(/[^0-9.\\-]/g, '')); if (!isNaN(askV)) quote.ask = askV; }
+        } catch(e) {}
+        if (ext.description) quote.description = ext.description;
+        if (ext.exchange) quote.exchange = ext.exchange;
+        if (ext.type) quote.type = ext.type;
+        return quote;
+      })()
+    `);
+    if (!data || (!data.last && !data.close)) {
+      throw new ClassifiedError(CATEGORIES.CHART_LOADING, 'Could not retrieve quote. The chart may still be loading.');
+    }
+    quoteResult = { success: true, ...data };
+  } catch (err) {
+    operationError = err;
+  } finally {
+    if (needsRestore && originalSymbol) {
       try {
-        var bidEl = document.querySelector('[class*="bid"] [class*="price"], [class*="dom-"] [class*="bid"]');
-        var askEl = document.querySelector('[class*="ask"] [class*="price"], [class*="dom-"] [class*="ask"]');
-        if (bidEl) { var bidV = parseFloat(bidEl.textContent.replace(/[^0-9.\\-]/g, '')); if (!isNaN(bidV)) quote.bid = bidV; }
-        if (askEl) { var askV = parseFloat(askEl.textContent.replace(/[^0-9.\\-]/g, '')); if (!isNaN(askV)) quote.ask = askV; }
-      } catch(e) {}
-      try {
-        var hdr = document.querySelector('[class*="headerRow"] [class*="last-"]');
-        if (hdr) { var hdrPrice = parseFloat(hdr.textContent.replace(/[^0-9.\\-]/g, '')); if (!isNaN(hdrPrice)) quote.header_price = hdrPrice; }
-      } catch(e) {}
-      if (ext.description) quote.description = ext.description;
-      if (ext.exchange) quote.exchange = ext.exchange;
-      if (ext.type) quote.type = ext.type;
-      return quote;
-    })()
-  `);
-  if (!data || (!data.last && !data.close)) {
-    throw new ClassifiedError(CATEGORIES.CHART_LOADING, 'Could not retrieve quote. The chart may still be loading.');
+        await deps.evaluateAsync(`
+          (function() {
+            var chart = ${CHART_API};
+            return new Promise(function(resolve) {
+              chart.setSymbol(${safeString(originalSymbol)}, {});
+              setTimeout(resolve, 500);
+            });
+          })()
+        `);
+        const restored = await deps.waitForChartReady(originalSymbol);
+        if (!restored) {
+          throw new ClassifiedError(
+            CATEGORIES.CHART_LOADING,
+            `Original quote symbol ${originalSymbol} did not finish restoring`,
+          );
+        }
+      } catch (err) {
+        restoreError = { error: err.message, category: err.category || CATEGORIES.API_UNEXPECTED };
+      }
+    }
   }
-  return { success: true, ...data };
+  if (operationError) {
+    if (restoreError) {
+      throw new ClassifiedError(
+        CATEGORIES.API_UNEXPECTED,
+        `${operationError.message}; chart restoration also failed: ${restoreError.error}`,
+        {
+          cause: operationError,
+          hint: 'The quote operation failed and the starting chart could not be restored. Verify the active symbol before continuing.',
+        },
+      );
+    }
+    throw operationError;
+  }
+  return {
+    ...quoteResult,
+    ...(needsRestore ? { restored_start_state: !restoreError } : {}),
+    ...(restoreError ? { restore_error: restoreError } : {}),
+  };
 }
 
 export async function getDepth() {
@@ -501,8 +738,9 @@ export async function getDepth() {
   return { success: true, bid_levels: data.bids?.length || 0, ask_levels: data.asks?.length || 0, spread: data.spread, bids: data.bids || [], asks: data.asks || [], raw_values: data.raw_values, note: data.note };
 }
 
-export async function getStudyValues() {
-  const data = await evaluate(`
+export async function getStudyValues({ _deps } = {}) {
+  const deps = _resolve(_deps);
+  const data = await deps.evaluate(`
     (function() {
       var chart = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget;
       var model = chart.model();
@@ -516,6 +754,20 @@ export async function getStudyValues() {
           var name = meta.description || meta.shortDescription || '';
           if (!name) continue;
           var values = {};
+          var entityId = null;
+          var inputs = [];
+          try { entityId = typeof s.id === 'function' ? s.id() : (s.id || null); } catch(e) {}
+          try {
+            var rawInputs = typeof s.getInputValues === 'function' ? s.getInputValues() : [];
+            if (Array.isArray(rawInputs)) {
+              for (var ri = 0; ri < rawInputs.length; ri++) {
+                var input = rawInputs[ri];
+                if (!input || !input.id) continue;
+                if (typeof input.value === 'string' && input.value.length > 500) continue;
+                inputs.push({ id: input.id, value: input.value });
+              }
+            }
+          } catch(e) {}
           try {
             var dwv = s.dataWindowView();
             if (dwv) {
@@ -528,7 +780,7 @@ export async function getStudyValues() {
               }
             }
           } catch(e) {}
-          if (Object.keys(values).length > 0) results.push({ name: name, values: values });
+          if (Object.keys(values).length > 0) results.push({ entity_id: entityId, name: name, inputs: inputs, values: values });
         } catch(e) {}
       }
       return results;
@@ -548,8 +800,8 @@ export async function getPineLines({ study_filter, verbose } = {}) {
     const allLines = [];
     for (const item of s.items) {
       const v = item.raw;
-      const y1 = v.y1 != null ? Math.round(v.y1 * 100) / 100 : null;
-      const y2 = v.y2 != null ? Math.round(v.y2 * 100) / 100 : null;
+      const y1 = roundPrice(v.y1);
+      const y2 = roundPrice(v.y2);
       if (verbose) allLines.push({ id: item.id, y1, y2, x1: v.x1, x2: v.x2, horizontal: v.y1 === v.y2, style: v.st, width: v.w, color: v.ci });
       if (y1 != null && v.y1 === v.y2 && !seen[y1]) { hLevels.push(y1); seen[y1] = true; }
     }
@@ -571,7 +823,7 @@ export async function getPineLabels({ study_filter, max_labels, verbose } = {}) 
     let labels = s.items.map(item => {
       const v = item.raw;
       const text = v.t || '';
-      const price = v.y != null ? Math.round(v.y * 100) / 100 : null;
+      const price = roundPrice(v.y);
       if (verbose) return { id: item.id, text, price, x: v.x, yloc: v.yl, size: v.sz, textColor: v.tci, color: v.ci };
       return { text, price };
     }).filter(l => l.text || l.price != null);
@@ -624,8 +876,8 @@ export async function getPineBoxes({ study_filter, verbose } = {}) {
     const allBoxes = [];
     for (const item of s.items) {
       const v = item.raw;
-      const high = v.y1 != null && v.y2 != null ? Math.round(Math.max(v.y1, v.y2) * 100) / 100 : null;
-      const low = v.y1 != null && v.y2 != null ? Math.round(Math.min(v.y1, v.y2) * 100) / 100 : null;
+      const high = v.y1 != null && v.y2 != null ? roundPrice(Math.max(v.y1, v.y2)) : null;
+      const low = v.y1 != null && v.y2 != null ? roundPrice(Math.min(v.y1, v.y2)) : null;
       if (verbose) allBoxes.push({ id: item.id, high, low, x1: v.x1, x2: v.x2, borderColor: v.c, bgColor: v.bc });
       if (high != null && low != null) { const key = high + ':' + low; if (!seen[key]) { zones.push({ high, low }); seen[key] = true; } }
     }

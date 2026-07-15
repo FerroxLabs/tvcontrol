@@ -24,10 +24,24 @@ export function registerWatchlistTools(server) {
     }
   });
 
+  server.tool('watchlist_add_bulk', 'Add multiple symbols sequentially and report per-symbol results', {
+    symbols: z.array(z.string()).min(1).max(100).describe('Symbols to add'),
+  }, async ({ symbols }) => {
+    try { return jsonResult(await core.addBulk({ symbols })); }
+    catch (err) { return errorResult(err); }
+  });
+
   server.tool('watchlist_remove', 'Remove a symbol from the TradingView watchlist', {
     symbol: z.string().describe('Symbol to remove (e.g., AAPL)'),
   }, async ({ symbol }) => {
     try { return jsonResult(await core.remove({ symbol })); }
+    catch (err) { return errorResult(err); }
+  });
+
+  server.tool('watchlist_remove_bulk', 'Remove multiple symbols sequentially and report per-symbol results', {
+    symbols: z.array(z.string()).min(1).max(100).describe('Symbols to remove'),
+  }, async ({ symbols }) => {
+    try { return jsonResult(await core.removeBulk({ symbols })); }
     catch (err) { return errorResult(err); }
   });
 

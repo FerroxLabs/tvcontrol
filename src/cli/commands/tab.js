@@ -10,8 +10,12 @@ register('tab', {
       handler: () => core.list(),
     }],
     ['new', {
-      description: 'Open a new chart tab',
-      handler: () => core.newTab(),
+      description: 'Open a new tab, optionally loading a saved layout',
+      options: {
+        layout: { type: 'string', short: 'l', description: 'Saved layout name or "new"' },
+        name: { type: 'string', short: 'n', description: 'Symbol name when layout is "new"' },
+      },
+      handler: (opts) => core.newTab({ layout: opts.layout, name: opts.name }),
     }],
     ['close', {
       description: 'Close the current tab',

@@ -3,12 +3,41 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { deleteById } from '../src/core/alerts.js';
+import { create, deleteById } from '../src/core/alerts.js';
 import { scriptedDeps, loadFixture } from './_helpers.js';
 import { CATEGORIES } from '../src/errors.js';
 
 const OK_RESPONSE = { s: 'ok', method: 'post' };
 const ERR_RESPONSE = { s: 'error', errmsg: 'not found' };
+
+describe('create()', () => {
+  it('uses the authenticated alert API and applies the requested condition', async () => {
+    const calls = [];
+    const result = await create({
+      condition: 'greater_than',
+      price: 500,
+      message: 'Breakout',
+      _deps: {
+        evaluateAsync: async (expression) => {
+          calls.push(expression);
+          return { ok: true, symbol: 'NASDAQ:AAPL', message: 'Breakout', alert_id: 'a1' };
+        },
+      },
+    });
+    assert.equal(result.success, true);
+    assert.equal(result.condition, 'greater');
+    assert.equal(result.condition_applied, true);
+    assert.equal(result.mobile_push, true);
+    assert.match(calls[0], /pricealerts\.tradingview\.com\/create_alert/);
+  });
+
+  it('rejects unsupported conditions before making a request', async () => {
+    await assert.rejects(
+      create({ condition: 'approximately', price: 500, _deps: { evaluateAsync: async () => {} } }),
+      (error) => error.category === CATEGORIES.INVALID_ARGUMENT,
+    );
+  });
+});
 
 describe('deleteById()', () => {
   it('returns success with method rest_api on ok REST response', async () => {

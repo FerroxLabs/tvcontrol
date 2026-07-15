@@ -5,7 +5,7 @@
 #   - Node 18+
 #   - jq (brew install jq / apt install jq)
 #
-# What this proves: the CLI runs, ships 88 tools, and Pine static analysis works
+# What this proves: the CLI runs, ships 102 tools, and Pine static analysis works
 # without TradingView Desktop being open.
 #
 # Exit 0 on success, non-zero with a clear message otherwise.
@@ -19,10 +19,10 @@ echo "→ CLI help (first 3 lines):"
 $TV --help | head -3
 
 echo
-echo "→ Tool count (expect 88):"
+echo "→ Tool count (expect 102):"
 COUNT=$(node scripts/count_tools.js | jq -r '.total')
 echo "  total=$COUNT"
-[ "$COUNT" = "88" ] || { echo "✗ expected 88 tools, got $COUNT"; exit 1; }
+[ "$COUNT" = "102" ] || { echo "✗ expected 102 tools, got $COUNT"; exit 1; }
 
 echo
 echo "→ Pine static analysis on a valid script (expect success=true, count=0):"
@@ -36,4 +36,4 @@ DIAG=$(echo "$RESULT" | jq -r '.count')
 [ "$OK" = "true" ] && [ "$DIAG" = "0" ] || { echo "✗ analyze did not return success=true count=0"; exit 1; }
 
 echo
-echo "✓ Install verified: CLI runs, 88 tools registered, offline Pine analyzer works."
+echo "✓ Install verified: CLI runs, 102 tools registered, offline Pine analyzer works."

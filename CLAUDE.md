@@ -2,7 +2,7 @@
 
 # tvcontrol — Claude Instructions
 
-88 tools for reading and controlling a live TradingView Desktop chart via CDP (port 9222).
+102 tools for reading, diagnosing, and controlling a live TradingView Desktop chart via CDP (port 9222).
 
 ## Decision Tree — Which Tool When
 
@@ -104,6 +104,11 @@ Use `study_filter` parameter to target a specific indicator by name substring (e
 ### "TradingView isn't running"
 - `tv_launch` → auto-detect and launch TradingView with CDP on Mac/Win/Linux
 - `tv_health_check` → verify connection is working
+
+### "Is TVControl healthy and compatible?"
+- `tv_capability_matrix` → show which TradingView APIs each tool requires and which tools are currently blocked
+- `tv_support_bundle` → create a compressed privacy-safe diagnostic bundle
+- CLI-only reliability runners: `tv chaos`, `tv soak`, `tv golden`, and `tv watchdog service-plan`
 
 ## Context Management Rules
 

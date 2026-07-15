@@ -7,6 +7,29 @@ import * as dataCore from '../../core/data.js';
 register('indicator', {
   description: 'Indicator tools (add, remove, toggle, set, get)',
   subcommands: new Map([
+    ['search', {
+      description: 'Search built-in, community, strategy, and saved studies',
+      usage: '<query> [--limit <n>]',
+      options: {
+        limit: { type: 'string', short: 'l', description: 'Maximum results (default 25)' },
+      },
+      handler: (opts, positionals) => {
+        _arg(positionals[0], 'Search query required. Usage: tv indicator search "Relative Strength"');
+        return indCore.searchStudies({ query: positionals.join(' '), limit: opts.limit });
+      },
+    }],
+    ['add-search', {
+      description: 'Search the TradingView dialog and add a matching study',
+      usage: '<query> [--match <title>] [--section <name>]',
+      options: {
+        match: { type: 'string', short: 'm', description: 'Exact or partial title to add' },
+        section: { type: 'string', short: 's', description: 'Optional result section' },
+      },
+      handler: (opts, positionals) => {
+        _arg(positionals[0], 'Search query required. Usage: tv indicator add-search "VWAP"');
+        return indCore.addStudyFromSearch({ query: positionals.join(' '), match: opts.match, section: opts.section });
+      },
+    }],
     ['add', {
       description: 'Add an indicator to the chart',
       usage: '<indicator_name> [-i <json>]',

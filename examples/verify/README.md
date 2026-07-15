@@ -33,7 +33,7 @@ precondition isn't met (no strategy loaded, watchlist panel closed, etc).
 
 | Script | Mode | What it verifies |
 |--------|------|------------------|
-| `00-verify-install.sh` | OFFLINE | CLI loads, 88 tools registered, Pine analyzer works |
+| `00-verify-install.sh` | OFFLINE | CLI loads, 102 tools registered, Pine analyzer works |
 | `01-first-call.sh` | online | CDP health + chart state + live quote |
 | `02-chart-vision-read.sh` | online | Multi-call `chart_vision_read` equivalent (state + quote + OHLCV + studies + screenshot) |
 | `03-symbol-and-indicators.sh` | online | Symbol/timeframe change, add RSI + EMA, read values, cleanup |

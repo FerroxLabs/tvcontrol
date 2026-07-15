@@ -1,6 +1,6 @@
 /**
  * CLI unit tests — no TradingView connection needed.
- * Tests: help output, pine analyze, pine check, error handling, exit codes.
+ * Tests: help output, Pine analysis, error handling, and exit codes.
  *
  * Run: node --test tests/cli.test.js
  */
@@ -60,6 +60,20 @@ describe('CLI — help and routing', () => {
     const { exitCode, stderr } = run(['nonexistent']);
     assert.equal(exitCode, 1);
     assert.ok(stderr.includes('Unknown command'));
+  });
+
+  it('unknown flags fail instead of being silently ignored', () => {
+    const { exitCode, stderr } = run(['pine', 'analyze', '--definitely-not-a-real-flag'], { input: '//@version=6\nindicator("x")' });
+    assert.equal(exitCode, 1);
+    assert.match(stderr, /unknown option/i);
+  });
+
+  it('ui eval is disabled unless advanced mode is explicitly enabled', () => {
+    const env = { ...process.env };
+    delete env.TV_MCP_ADVANCED;
+    const { exitCode, stderr } = run(['ui', 'eval', '1+1'], { env });
+    assert.equal(exitCode, 1);
+    assert.match(stderr, /disabled/i);
   });
 
   it('pine --help shows subcommands', () => {
@@ -126,25 +140,5 @@ describe('CLI — pine analyze (offline)', () => {
     } finally {
       unlinkSync(tmpFile);
     }
-  });
-});
-
-describe('CLI — pine check (server compile)', () => {
-  it('compiles valid Pine Script', () => {
-    const source = '//@version=6\nindicator("test")\nplot(close)';
-    const { stdout, exitCode } = run(['pine', 'check'], { input: source });
-    assert.equal(exitCode, 0);
-    const result = JSON.parse(stdout);
-    assert.equal(result.success, true);
-    assert.equal(result.compiled, true);
-  });
-
-  it('returns errors for invalid Pine Script', () => {
-    const source = '//@version=6\nindicator("test")\nplot(nonexistent_var)';
-    const { stdout, exitCode } = run(['pine', 'check'], { input: source });
-    assert.equal(exitCode, 0);
-    const result = JSON.parse(stdout);
-    assert.equal(result.compiled, false);
-    assert.ok(result.error_count > 0);
   });
 });

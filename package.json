@@ -1,7 +1,7 @@
 {
   "name": "@ferroxlabs/tvcontrol",
-  "version": "2.1.0",
-  "description": "AI remote control for TradingView Desktop — 88 MCP tools driving symbols, indicators, Pine Script, snapshots, sweeps, and live chart vision over CDP.",
+  "version": "2.2.0",
+  "description": "AI remote control for TradingView Desktop — 102 MCP tools driving symbols, indicators, Pine Script, snapshots, sweeps, diagnostics, and live chart vision over CDP.",
   "type": "module",
   "license": "MIT",
   "author": "Ferrox Labs",
@@ -13,6 +13,17 @@
   "bugs": {
     "url": "https://github.com/FerroxLabs/tvcontrol/issues"
   },
+  "keywords": [
+    "tradingview",
+    "mcp",
+    "model-context-protocol",
+    "pine-script",
+    "automation",
+    "technical-analysis"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "main": "src/server.js",
   "bin": {
     "tv": "src/cli/index.js",
@@ -22,11 +33,25 @@
     ".": "./src/server.js",
     "./core": "./src/core/index.js"
   },
+  "files": [
+    "src/",
+    "scripts/launch_tv_debug*",
+    "scripts/pine_pull.js",
+    "scripts/pine_push.js",
+    "scripts/watchdog_daemon.js",
+    "skills/",
+    "agents/",
+    "examples/mcp-config.example.json",
+    "CHANGELOG.md",
+    "docs/UPGRADING.md",
+    "docs/releases/"
+  ],
   "scripts": {
     "start": "node src/server.js",
     "tv": "node src/cli/index.js",
+    "lint": "eslint src/ tests/",
     "test": "npm run test:offline",
-    "test:offline": "node --test tests/sanitization.test.js tests/connection.test.js tests/replay.test.js tests/pine_analyze.test.js tests/cli.test.js tests/fixtures.test.js tests/errors.test.js tests/watchlist.test.js tests/alerts.test.js tests/state.test.js tests/sweep.test.js tests/sweep_parallel.test.js tests/vision.test.js tests/data_get_indicator.test.js tests/telemetry.test.js tests/tool_count.test.js tests/integration.test.js",
+    "test:offline": "node scripts/run_offline_tests.js",
     "test:e2e": "node --test tests/e2e.test.js",
     "test:unit": "node --test tests/pine_analyze.test.js tests/cli.test.js",
     "test:cli": "node --test tests/cli.test.js",
@@ -38,7 +63,10 @@
     "node": ">=18.14.1"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.12.1",
-    "chrome-remote-interface": "0.33.2"
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "chrome-remote-interface": "0.34.0"
+  },
+  "devDependencies": {
+    "eslint": "9.39.4"
   }
 }

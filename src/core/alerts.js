@@ -1,7 +1,7 @@
 /**
  * Core alert logic.
  */
-import { evaluate as _evaluate, evaluateAsync as _evaluateAsync, getClient, safeString } from '../connection.js';
+import { evaluate as _evaluate, evaluateAsync as _evaluateAsync, safeString, requireFinite } from '../connection.js';
 import { ClassifiedError, CATEGORIES } from '../errors.js';
 
 function _resolve(deps) {
@@ -11,109 +11,88 @@ function _resolve(deps) {
   };
 }
 
-export async function create({ condition, price, message }) {
-  const opened = await _evaluate(`
-    (function() {
-      var btn = document.querySelector('[aria-label="Create Alert"]')
-        || document.querySelector('[data-name="alerts"]');
-      if (btn) { btn.click(); return true; }
-      return false;
-    })()
-  `);
+const CONDITION_TYPES = {
+  crossing: 'cross', cross: 'cross',
+  greater_than: 'greater', greater: 'greater', above: 'greater', '>': 'greater',
+  less_than: 'less', less: 'less', below: 'less', '<': 'less',
+};
 
-  if (!opened) {
-    const client = await getClient();
-    await client.Input.dispatchKeyEvent({ type: 'keyDown', modifiers: 1, key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65 });
-    await client.Input.dispatchKeyEvent({ type: 'keyUp', key: 'a', code: 'KeyA' });
+export async function create({ condition = 'crossing', price, message, mobile_push = true, expiration_days = 30, _deps } = {}) {
+  const { evaluateAsync } = _resolve(_deps);
+  const numericPrice = requireFinite(price, 'price');
+  const conditionType = CONDITION_TYPES[String(condition).trim().toLowerCase()];
+  if (!conditionType) {
+    throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, `Unsupported alert condition: ${condition}`);
+  }
+  const expiryDays = Number(expiration_days);
+  if (!Number.isInteger(expiryDays) || expiryDays < 1 || expiryDays > 365) {
+    throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'expiration_days must be an integer from 1 to 365');
   }
 
-  await new Promise(r => setTimeout(r, 1000));
-
-  const priceSet = await _evaluate(`
-    (function() {
-      var inputs = document.querySelectorAll('[class*="alert"] input[type="text"], [class*="alert"] input[type="number"]');
-      for (var i = 0; i < inputs.length; i++) {
-        var label = inputs[i].closest('[class*="row"]')?.querySelector('[class*="label"]');
-        if (label && /value|price/i.test(label.textContent)) {
-          var nativeSet = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-          nativeSet.call(inputs[i], ${safeString(String(price))});
-          inputs[i].dispatchEvent(new Event('input', { bubbles: true }));
-          inputs[i].dispatchEvent(new Event('change', { bubbles: true }));
-          return true;
+  const result = await evaluateAsync(`
+    (async function() {
+      try {
+        var series = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget.model().mainSeries();
+        var symbol = (series.proSymbol && series.proSymbol()) || (series.symbol && series.symbol());
+        if (!symbol) return { ok: false, error: 'Could not read the current chart symbol' };
+        var price = ${JSON.stringify(numericPrice)};
+        var conditionType = ${safeString(conditionType)};
+        var message = ${safeString(message || '')};
+        if (!message) {
+          var verb = conditionType === 'greater' ? 'above' : (conditionType === 'less' ? 'below' : 'crossing');
+          message = symbol.split(':').pop() + ' ' + verb + ' ' + price;
         }
-      }
-      if (inputs.length > 0) {
-        var nativeSet = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-        nativeSet.call(inputs[0], ${safeString(String(price))});
-        inputs[0].dispatchEvent(new Event('input', { bubbles: true }));
-        return true;
-      }
-      return false;
-    })()
-  `);
-
-  if (message) {
-    await _evaluate(`
-      (function() {
-        var textarea = document.querySelector('[class*="alert"] textarea')
-          || document.querySelector('textarea[placeholder*="message"]');
-        if (textarea) {
-          var nativeSet = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
-          nativeSet.call(textarea, ${JSON.stringify(message)});
-          textarea.dispatchEvent(new Event('input', { bubbles: true }));
+        var payload = {
+          conditions: [{
+            type: conditionType,
+            frequency: 'on_first_fire',
+            series: [{ type: 'barset' }, { type: 'value', value: price }],
+            resolution: '1'
+          }],
+          symbol: '={"symbol":"' + symbol + '"}',
+          resolution: '1', message: message,
+          sound_file: 'alert/fired', sound_duration: 0,
+          popup: true, auto_deactivate: true,
+          email: false, sms_over_email: false,
+          mobile_push: ${mobile_push !== false}, web_hook: null, name: null,
+          expiration: new Date(Date.now() + ${expiryDays} * 86400000).toISOString(),
+          active: true, ignore_warnings: true
+        };
+        var response = await fetch('https://pricealerts.tradingview.com/create_alert', {
+          method: 'POST', credentials: 'include',
+          headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
+          body: JSON.stringify({ payload: payload })
+        });
+        var text = await response.text();
+        var data = {}; try { data = JSON.parse(text); } catch (e) {}
+        if (response.ok && data.s === 'ok') {
+          return { ok: true, symbol: symbol, message: message, alert_id: data.r && data.r.alert_id };
         }
-      })()
-    `);
-  }
-
-  await new Promise(r => setTimeout(r, 500));
-  const created = await _evaluate(`
-    (function() {
-      var btns = document.querySelectorAll('button[data-name="submit"], button');
-      for (var i = 0; i < btns.length; i++) {
-        if (/^create$/i.test(btns[i].textContent.trim())) { btns[i].click(); return true; }
-      }
-      return false;
+        return { ok: false, status: response.status, error: (data.err && data.err.code) || data.errmsg || text.slice(0, 200) };
+      } catch (e) { return { ok: false, error: e.message }; }
     })()
   `);
-
-  // Explain the failure instead of returning {success:false, error:null}.
-  // Each step ('opened', 'priceSet', 'created') can fail independently — the
-  // response has to carry which step faltered so the user can recover.
-  if (!created) {
-    const reasons = [];
-    if (!opened) reasons.push('alert dialog did not open (Create Alert button not found and keyboard shortcut Alt+A may have been intercepted)');
-    if (!priceSet) reasons.push('price input field not found in the alert dialog');
-    reasons.push('Create submit button not found');
-    throw new ClassifiedError(
-      CATEGORIES.TV_UI_CHANGED,
-      'Alert dialog could not be completed',
-      {
-        hint: reasons.join(' → ') + '. Open the Alerts panel manually via ui_open_panel({panel: "alerts", action: "open"}) and retry.',
-      },
-    );
+  if (!result?.ok) {
+    throw new ClassifiedError(CATEGORIES.API_UNEXPECTED, `TradingView alert API rejected the request: ${result?.error || 'unknown error'}`);
   }
-
-  // `condition` is NOT applied by this DOM fallback — the alert uses whatever
-  // condition TradingView's dialog defaults to (typically "Crossing").
-  // Implementing the condition dropdown needs live-verified selectors we don't
-  // have; until then, surface this explicitly so the alert's actual trigger is
-  // never SILENTLY wrong — a silent default would produce false signals.
   return {
     success: true,
-    price,
-    requested_condition: condition,
-    condition_applied: false,
-    warning: `condition "${condition}" was NOT set programmatically — the alert uses TradingView's default condition. Verify/adjust it in the dialog if the trigger direction matters.`,
-    message: message || '(none)',
-    price_set: !!priceSet,
-    source: 'dom_fallback',
+    source: 'pricealerts_api',
+    symbol: result.symbol,
+    alert_id: result.alert_id || null,
+    condition: conditionType,
+    condition_applied: true,
+    price: numericPrice,
+    message: result.message,
+    mobile_push: mobile_push !== false,
+    expiration_days: expiryDays,
   };
 }
 
-export async function list() {
+export async function list({ _deps } = {}) {
+  const { evaluateAsync } = _resolve(_deps);
   // Use pricealerts REST API — returns structured data with alert_id, symbol, price, conditions
-  const result = await _evaluateAsync(`
+  const result = await evaluateAsync(`
     fetch('https://pricealerts.tradingview.com/list_alerts', { credentials: 'include' })
       .then(function(r) { return r.json(); })
       .then(function(data) {
@@ -153,48 +132,36 @@ export async function list() {
   };
 }
 
-export async function deleteAlerts({ delete_all, alert_id } = {}) {
+export async function deleteAlerts({ delete_all, alert_ids, alert_id, _deps } = {}) {
+  const { evaluateAsync } = _resolve(_deps);
+  let ids = Array.isArray(alert_ids) ? [...alert_ids] : [];
+  if (alert_id != null) ids.push(alert_id);
   if (delete_all) {
-    const result = await _evaluateAsync(`
-      (async function() {
-        var settle = function(ms){ return new Promise(function(r){ setTimeout(r, ms); }); };
-        var alertBtn = document.querySelector('[data-name="alerts"]');
-        if (alertBtn) alertBtn.click();
-        // Wait a layout tick for the panel to render. The old code re-queried
-        // [data-name="alerts"] SYNCHRONOUSLY and matched the SIDEBAR BUTTON
-        // again — right-clicking the button instead of the panel header, a
-        // silent no-op. Use a distinct panel-header selector here.
-        await settle(400);
-        var header = document.querySelector('.widgetbar-widgetheader')
-          || document.querySelector('[class*="widgetbar"] [class*="header"]')
-          || document.querySelector('[data-name="alerts-settings-button"]');
-        if (header) {
-          var rect = header.getBoundingClientRect();
-          header.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: rect.x + 10, clientY: rect.y + 10 }));
-          return { context_menu_opened: true };
-        }
-        return { context_menu_opened: false };
-      })()
-    `);
-    if (!result?.context_menu_opened) {
-      // The DOM selector didn't match — TV UI changed or panel not present.
-      // Caller should not see success:true for a no-op. Throw classified.
-      throw new ClassifiedError(
-        CATEGORIES.TV_UI_CHANGED,
-        'Could not open alerts context menu — DOM selector did not match.',
-        { hint: 'TradingView UI may have changed. Try ui_open_panel({panel: "alerts"}) first, then retry, or use alert_delete_by_id with a specific alert_id.' },
-      );
-    }
-    return { success: true, note: 'Alert deletion requires manual confirmation in the context menu.', context_menu_opened: true, source: 'dom_fallback' };
+    const current = await list({ _deps });
+    if (!current.success) throw new ClassifiedError(CATEGORIES.API_UNEXPECTED, current.error || 'Could not list alerts before delete-all');
+    ids = current.alerts.map((alert) => alert.alert_id);
   }
-  if (alert_id) {
-    return { success: true, note: 'DOM fallback for single alert deletion: open the Alerts panel and remove manually.', source: 'dom_fallback' };
+  ids = [...new Set(ids.filter((value) => value != null && String(value).trim() !== ''))];
+  if (ids.length === 0) {
+    throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, delete_all ? 'No active alerts to delete' : 'Provide alert_id, alert_ids, or delete_all:true');
   }
-  throw new ClassifiedError(
-    CATEGORIES.INVALID_ARGUMENT,
-    'Individual alert deletion not yet supported.',
-    { hint: 'Use alert_delete_by_id with a specific alert_id, or alert_delete with delete_all: true.' },
-  );
+
+  const result = await evaluateAsync(`
+    (async function() {
+      try {
+        var response = await fetch('https://pricealerts.tradingview.com/delete_alerts', {
+          method: 'POST', credentials: 'include',
+          headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
+          body: JSON.stringify({ payload: { alert_ids: ${JSON.stringify(ids)} } })
+        });
+        var text = await response.text();
+        var data = {}; try { data = JSON.parse(text); } catch (e) {}
+        return { ok: response.ok && data.s === 'ok', status: response.status, error: data.errmsg || text.slice(0, 200) };
+      } catch (e) { return { ok: false, error: e.message }; }
+    })()
+  `);
+  if (!result?.ok) throw new ClassifiedError(CATEGORIES.API_UNEXPECTED, `TradingView alert deletion failed: ${result?.error || 'unknown error'}`);
+  return { success: true, source: 'pricealerts_api', deleted_count: ids.length, alert_ids: ids };
 }
 
 export async function deleteById({ alert_id, _deps } = {}) {

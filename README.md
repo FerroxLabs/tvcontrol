@@ -8,11 +8,25 @@
 
 > **Tell your AI what you want from your TradingView chart. Watch it happen on screen.**
 
-TVControl turns your TradingView Desktop into something you can talk to. You type a sentence (*"summarise this chart"*, *"sweep this strategy across SPY, QQQ and IWM on 5m and 15m"*, *"step through last March bar by bar and call out the breakout"*) and the AI reads, clicks, types, compiles and screenshots inside the actual TradingView app on your machine. No copy-paste. No screen-share to the cloud. Nothing leaves your computer.
+TVControl turns your TradingView Desktop into something you can talk to. You type a sentence (*"summarise this chart"*, *"sweep this strategy across SPY, QQQ and IWM on 5m and 15m"*, *"step through last March bar by bar and call out the breakout"*) and the AI reads, clicks, types, compiles and screenshots inside the actual TradingView app on your machine. No copy-paste and no TVControl-operated cloud backend. TradingView Desktop and explicitly selected public-API helpers still communicate with TradingView as documented.
 
-It works because every Chromium app, TradingView Desktop included, ships with a built-in debugging interface (the same one Chrome uses to debug itself). TVControl speaks that interface on your behalf, exposing **88 chart-control tools** to any AI agent that supports the Model Context Protocol (Claude Code, Codex, Gemini CLI, Cursor, and others). Pair-program in Pine Script. Optimize parameter grids. Snapshot and restore whole chart setups. Drive 4-pane layouts. Step through replay. Scan a watchlist. All by speech-to-action.
+It works because every Chromium app, TradingView Desktop included, ships with a built-in debugging interface (the same one Chrome uses to debug itself). TVControl speaks that interface on your behalf, exposing **102 chart-control and diagnostic tools** to any AI agent that supports the Model Context Protocol (Claude Code, Codex, Gemini CLI, Cursor, and others). Pair-program in Pine Script. Optimize parameter grids. Snapshot and restore whole chart setups. Drive 4-pane layouts. Step through replay. Scan a watchlist. All by speech-to-action.
 
-**88 MCP tools · ~320 unit tests · 10 verify scripts · 8 prompt-library workflows · zero cloud calls.** Everything in this repo is real, tested, and used daily.
+**102 MCP tools · 512 deterministic offline tests · 10 verify scripts · 8 prompt-library workflows · no TVControl cloud backend.** Everything in this repo is real, tested, and used daily.
+
+## What is new in 2.2.0
+
+Version 2.2.0 is the reliability and operations release: the original 88-tool chart controller has grown into a 102-tool control and diagnostic system.
+
+- **Know what works before acting.** `tv_capability_matrix`, compatibility snapshots, reconnect-banner detection, and per-tool runtime gates identify TradingView API drift before a chart mutation starts.
+- **Recover instead of guessing.** The privacy-safe watchdog records bounded health transitions; native launchd, systemd-user, and Windows Task Scheduler definitions keep long-running monitoring available.
+- **Prove critical workflows.** Dry-run-first chaos checks, bounded soak runners, and golden workflows produce scrubbed JSON receipts for connection, renderer, tab, Pine, watchlist, strategy, snapshot, and replay behavior.
+- **Diagnose without leaking a chart.** Compressed support bundles remove symbols, URLs, titles, account-linked fields, source code, secrets, home paths, and raw error messages.
+- **Safer concurrent control.** Cross-process mutation leases prevent multiple agents and CLI processes from changing the same TradingView session at once; connection establishment is coalesced and time-bounded.
+- **More useful daily operations.** Bulk watchlist changes, indicator-dialog search and add, bounded layout pagination, improved native-tab control, precise strategy selection, and chart-state restoration reduce manual cleanup.
+- **A stronger release floor.** The deterministic offline suite now covers 512 cases, and CI runs lint, tests, audit, and package checks across Linux, macOS, and Windows on Node 18 and 22.
+
+See the [2.2.0 release notes](./docs/releases/v2.2.0.md), [changelog](./CHANGELOG.md), and [upgrade guide](./docs/UPGRADING.md).
 
 ---
 
@@ -54,9 +68,9 @@ The full prompt library (every workflow above plus chart analysis, watchlist and
 
 This isn't a demo. It ships with a test battery.
 
-- **~320 offline unit tests** across 16 files: Pine analyzer, sanitization, replay, watchlist, alerts, state snapshots, sweep planning, vision wrapper, telemetry, tool registration, CLI routing.
+- **512 offline tests**: Pine analyzer, sanitization, replay, pane and indicator boundaries, watchlist, alerts, state snapshots, sweep planning, vision wrapper, telemetry, capability gating, privacy-safe bundles, chaos cleanup, soak bounds, golden workflows, native watchdog services, update safety, tool registration, and CLI routing. Live Pine-service checks are isolated in `tests/pine_api.test.js`.
 - **10 end-to-end verify scripts** under [`examples/verify/`](./examples/verify/) that drive the same MCP tools through the `tv` CLI against a live TradingView. Run `examples/verify/run-all.sh` and it auto-skips when TV isn't up.
-- **GitHub Actions CI** runs the offline suite on Node 18, 20, and 22 on every push.
+- **GitHub Actions CI** runs lint, offline tests, dependency audit, and package checks on Node 18 and 22 across Linux, macOS, and Windows.
 - **CDP smoke** (`scripts/smoke.sh`): live connection sanity check against your local TradingView.
 
 ```bash
@@ -71,7 +85,14 @@ If your version of TradingView reshapes some internal API, the verify battery is
 
 ## Quick starts
 
-> Also on npm: `npm install -g @ferroxlabs/tvcontrol` puts the `tv` and `tvcontrol` commands on your PATH (works for [Path C](#path-c-cli-only-no-agent-required); for the MCP-server paths below, the global install lives under `$(npm root -g)/@ferroxlabs/tvcontrol/`).
+Install the current public release from npm:
+
+```bash
+npm install -g @ferroxlabs/tvcontrol
+tv --help
+```
+
+The package installs both `tv` and `tvcontrol`. For MCP-server configuration, use the installed `src/server.js` or one of the repository paths below.
 
 ### Path A. Claude Code, one prompt to install
 
@@ -97,6 +118,8 @@ scripts\launch_tv_debug.bat             # Windows
 # Or by hand on any platform:
 /path/to/TradingView --remote-debugging-port=9222
 ```
+
+On Windows Store/MSIX installations, `tv_launch` also detects the package with `Get-AppxPackage`. If Windows blocks CDP from the protected `WindowsApps` directory, it launches a versioned local copy under `%LOCALAPPDATA%\tvcontrol\desktop-cache` and reports `msix_local_copy: true`.
 
 Then add this to your MCP client config (`~/.claude/.mcp.json` for Claude Code, equivalent location for Codex / Gemini CLI / Cursor), replacing the path with your absolute path.
 
@@ -174,15 +197,35 @@ tv replay start / step / stop / status / autoplay / trade
 tv stream quote / bars / values / lines / labels / tables / all
 tv ui click / keyboard / hover / scroll / find / eval / type / panel / fullscreen / mouse
 tv screenshot / discover / ui-state / range / scroll
+tv capabilities / support
+tv chaos / soak / golden
+tv compatibility / watchdog sample / watchdog history / watchdog service-plan
 ```
 
-All commands return JSON. Every MCP tool has a CLI twin and vice versa.
+All commands return JSON. Core chart-control tools have CLI counterparts; long-running or disruptive reliability runners are deliberately CLI-first.
+
+## Reliability toolkit
+
+The compatibility layer checks the TradingView APIs required by each tool before execution. A tool is blocked only when the live canary explicitly confirms a required API is absent; if the canary itself is unavailable, recovery tools are still allowed to run.
+
+```bash
+tv capabilities                       # per-tool live capability matrix
+tv support                            # redacted .json.gz support bundle
+tv chaos                              # dry-run fault plan
+tv chaos --allow-live-faults          # bounded disconnect/stall/tab recovery checks
+tv soak --duration-ms 3600000         # health + stream + watchdog soak
+tv golden                             # six receipt-producing live workflows
+tv watchdog service-plan              # native service definition, no changes
+tv watchdog install --apply           # launchd/systemd-user/Task Scheduler
+```
+
+Chaos is dry-run unless `--allow-live-faults` is present. Restore/sweep soak scenarios and snapshot/replay golden checks require `--allow-mutations`. Watchdog install and uninstall are dry-run unless `--apply` is present. Receipts are bounded and omit symbols, URLs, account-linked identifiers, source code, and raw error messages.
 
 ---
 
 ## Streaming
 
-`tv stream` polls your local TradingView Desktop over CDP and emits JSONL. No connection to TradingView's servers; all data stays on your machine.
+`tv stream` polls your local TradingView Desktop over CDP and emits JSONL. TVControl has no streaming cloud backend; TradingView Desktop continues to communicate with TradingView normally.
 
 ```bash
 tv stream quote                          # tick-by-tick price
@@ -216,8 +259,8 @@ The full per-tool decision tree (*which tool to call for which question*) lives 
 ## How this stays safe to run
 
 - The debug port is off in TradingView until *you* enable it via the standard `--remote-debugging-port=9222` flag.
-- Nothing connects to TradingView's servers. The MCP server speaks CDP to the Electron app already running on your machine.
-- No data is transmitted, stored, or redistributed externally by this tool.
+- TVControl's chart-control path speaks CDP to the Electron app already running on your machine. TradingView Desktop and explicitly documented public helpers still communicate with TradingView.
+- TVControl does not operate a cloud backend. Local snapshots, telemetry, reliability receipts, and support bundles are written only when their corresponding features are used.
 - No real trades are executed. Chart, drawings, indicators, and Pine code only.
 
 The same CDP interface is built into every Chromium app: VS Code, Slack, Discord, Chrome itself. It's not a side door; it's the standard debugging interface Google ships with the runtime.
@@ -241,8 +284,8 @@ By using this software, you acknowledge that:
 1. You are solely responsible for ensuring your use complies with [TradingView's Terms of Use](https://www.tradingview.com/policies/) and all applicable laws.
 2. TradingView's Terms of Use **restrict automated data collection, scraping, and non-display usage** of their platform and data. TVControl uses Chrome DevTools Protocol to programmatically interact with the TradingView Desktop app, which may conflict with those terms.
 3. You assume all risk. Ferrox Labs and its contributors are not responsible for account bans, suspensions, legal actions, or any consequences resulting from use of this tool.
-4. This tool **must not be used** for: redistributing or commercially exploiting TradingView's market data; circumventing TradingView's access controls or paywalls; performing automated live trading; violating intellectual property rights of Pine Script authors; or connecting to TradingView's servers (all access is via the locally running Desktop app).
-5. Streaming functionality monitors only your local TradingView Desktop instance. It does not reach TradingView's servers.
+4. This tool **must not be used** for: redistributing or commercially exploiting TradingView's market data; circumventing TradingView's access controls or paywalls; performing automated live trading; or violating intellectual property rights of Pine Script authors.
+5. Streaming functionality polls only your local TradingView Desktop instance; the Desktop app remains responsible for its normal TradingView network connection.
 6. Market data accessed through this tool remains subject to exchange and provider licensing terms. **Do not redistribute, store, or commercially exploit it.**
 
 TVControl is not affiliated with, endorsed by, or associated with TradingView Inc. *TradingView* is a trademark of TradingView Inc.
@@ -255,7 +298,7 @@ If you are unsure whether your intended use complies with TradingView's terms, d
 
 TVControl began as a fork of [`tradingview-mcp`](https://github.com/tradesdontlie/tradingview-mcp) by **tradesdontlie**. That project established the core CDP-bridge approach and the original tool surface, and proved the whole "drive TradingView Desktop from an MCP agent" pattern was viable.
 
-TVControl builds on that foundation with full state snapshot and restore (including the `metaInfo` blob for published Pine), Cartesian strategy sweeps with disk memoization and parallel worker tabs, the combined `chart_vision_read` one-shot, classified-error handling with remediation hints, opt-in JSONL telemetry, an expanded offline test battery, end-to-end verify scripts, GitHub Actions CI, and a curated prompt library.
+TVControl builds on that foundation with full state snapshot and restore (including the `metaInfo` blob for published Pine), Cartesian strategy sweeps with disk memoization and parallel worker tabs, the combined `chart_vision_read` one-shot, classified-error handling with remediation hints, opt-in JSONL telemetry, capability-aware runtime gates, privacy-safe diagnostics, watchdog services, chaos/soak/golden verification, an expanded offline test battery, end-to-end verify scripts, cross-platform GitHub Actions CI, and a curated prompt library.
 
 Credit for the groundwork belongs to the upstream author. If you came here looking for the original, that's [right here](https://github.com/tradesdontlie/tradingview-mcp).
 

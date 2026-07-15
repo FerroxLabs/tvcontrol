@@ -7,6 +7,7 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { _withTimeout } from '../src/core/sweep_parallel.js';
 import { CATEGORIES } from '../src/errors.js';
 
@@ -42,5 +43,16 @@ describe('_withTimeout()', () => {
     const start = Date.now();
     await _withTimeout(Promise.resolve(1), 5000, 'x');
     assert.ok(Date.now() - start < 500, 'returned promptly, timer cleared');
+  });
+});
+
+describe('parallel CDP endpoint', () => {
+  it('uses the shared configurable endpoint instead of hard-coded localhost:9222', () => {
+    const source = readFileSync(new URL('../src/core/sweep_parallel.js', import.meta.url), 'utf8');
+    assert.match(source, /import \{[^}]*CDP_HOST[^}]*CDP_PORT[^}]*\} from '\.\.\/connection\.js'/);
+    assert.doesNotMatch(source, /const CDP_HOST\s*=\s*['"]localhost['"]/);
+    assert.doesNotMatch(source, /const CDP_PORT\s*=\s*9222/);
+    assert.doesNotMatch(source, /await fetch\(/);
+    assert.match(source, /fetchCdpResponse/);
   });
 });

@@ -3,6 +3,23 @@ import { jsonResult, errorResult } from './_format.js';
 import * as core from '../core/indicators.js';
 
 export function registerIndicatorTools(server) {
+  server.tool('indicator_search', 'Search TradingView built-in, community, strategy, and saved-script studies', {
+    query: z.string().describe('Search text entered in the TradingView Indicators dialog'),
+    limit: z.coerce.number().int().min(1).max(100).optional().describe('Maximum results to return (default 25, max 100)'),
+  }, async ({ query, limit }) => {
+    try { return jsonResult(await core.searchStudies({ query, limit })); }
+    catch (err) { return errorResult(err); }
+  });
+
+  server.tool('indicator_add_from_search', 'Search the TradingView Indicators dialog and add a matching built-in, strategy, community, or saved study', {
+    query: z.string().describe('Search query'),
+    match: z.string().optional().describe('Exact or partial result title to add (defaults to query)'),
+    section: z.string().optional().describe('Optional result section such as Technicals, My scripts, or Community Scripts'),
+  }, async ({ query, match, section }) => {
+    try { return jsonResult(await core.addStudyFromSearch({ query, match, section })); }
+    catch (err) { return errorResult(err); }
+  });
+
   server.tool('indicator_set_inputs', 'Change indicator/study input values (e.g., length, source, period)', {
     entity_id: z.string().describe('Entity ID of the study (from chart_get_state)'),
     inputs: z.string().describe('JSON string of input overrides, e.g. \'{"length": 50, "source": "close"}\'. Keys are input IDs, values are the new values.'),

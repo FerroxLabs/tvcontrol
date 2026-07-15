@@ -40,7 +40,7 @@ function makeDeps({
   restoreFn = null,
   writePartialFn = null,
 } = {}) {
-  const calls = { snapshot: [], restore: [], setSymbol: [], setTimeframe: [], setInputs: [] };
+  const calls = { snapshot: [], restore: [], setSymbol: [], setTimeframe: [], setInputs: [], getStrategyResults: [] };
   let comboIdx = 0;
 
   return {
@@ -49,7 +49,8 @@ function makeDeps({
       setTimeframe: async ({ timeframe }) => { calls.setTimeframe.push(timeframe); },
       waitForChartReady: async () => true,
       setInputs: async ({ inputs }) => { calls.setInputs.push(inputs); },
-      getStrategyResults: async () => {
+      getStrategyResults: async (args) => {
+        calls.getStrategyResults.push(args);
         const idx = comboIdx++;
         if (failOnCombo !== null && idx === failOnCombo) throw new Error(`combo ${idx} failed`);
         return { metrics };
@@ -200,7 +201,7 @@ describe('strategySweep() — validation', () => {
 
 describe('strategySweep() — happy path', () => {
   it('single-symbol single-TF single-input returns 1 result', async () => {
-    const { _deps } = makeDeps({ metrics: { 'Net Profit': '500' } });
+    const { _deps, calls } = makeDeps({ metrics: { 'Net Profit': '500' } });
     const result = await strategySweep({
       symbols: ['ES1!'],
       timeframes: ['15'],
@@ -215,6 +216,7 @@ describe('strategySweep() — happy path', () => {
     assert.equal(result.completed, 1);
     assert.equal(result.errored, 0);
     assert.equal(result.results.length, 1);
+    assert.deepEqual(calls.getStrategyResults, [{ entity_id: 'st_xxx' }]);
     assert.equal(result.results[0].symbol, 'ES1!');
     assert.equal(result.results[0].timeframe, '15');
     assert.deepEqual(result.results[0].inputs, { length: 20 });

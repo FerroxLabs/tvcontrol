@@ -22,9 +22,7 @@
  */
 import CDP from 'chrome-remote-interface';
 import { ClassifiedError, CATEGORIES } from '../errors.js';
-
-const CDP_HOST = 'localhost';
-const CDP_PORT = 9222;
+import { CDP_HOST, CDP_PORT, fetchCdpResponse, _withConnectionTimeout } from '../connection.js';
 // Per-call ceiling for a worker's Runtime.evaluate. Mirrors
 // DEFAULT_EVAL_TIMEOUT_MS in connection.js — without it a hung backtest or a
 // navigation-in-flight inside a worker tab leaves the evaluate promise pending
@@ -60,10 +58,11 @@ export async function _withTimeout(promise, ms, label) {
 async function _spawnTab() {
   // Encode the URL so the query parser doesn't fight us.
   const url = encodeURIComponent('https://www.tradingview.com/chart/');
-  const resp = await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/new?${url}`, { method: 'PUT' });
+  const path = `/json/new?${url}`;
+  const resp = await fetchCdpResponse(path, { method: 'PUT', timeoutMs: 10000 });
   if (!resp.ok) {
     // Some Chrome builds want POST; try once.
-    const resp2 = await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/new?${url}`);
+    const resp2 = await fetchCdpResponse(path, { timeoutMs: 10000 });
     if (!resp2.ok) {
       // Report BOTH statuses — the old message claimed the PUT status when
       // it was actually the GET fallback that failed last.
@@ -79,7 +78,7 @@ async function _spawnTab() {
 
 async function _closeTab(targetId) {
   try {
-    await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/close/${targetId}`);
+    await fetchCdpResponse(`/json/close/${encodeURIComponent(targetId)}`, { timeoutMs: 5000 });
   } catch (_) { /* best-effort */ }
 }
 
@@ -93,10 +92,16 @@ class SweepWorker {
   }
 
   async connect() {
-    this.cdp = await CDP({ host: CDP_HOST, port: CDP_PORT, target: this.target_id });
-    await this.cdp.Runtime.enable();
-    await this.cdp.Page.enable();
-    await this.cdp.DOM.enable();
+    this.cdp = await _withConnectionTimeout(
+      CDP({ host: CDP_HOST, port: CDP_PORT, target: this.target_id }),
+      10000,
+      `worker ${this.id}: CDP connect`,
+    );
+    await _withConnectionTimeout(
+      Promise.all([this.cdp.Runtime.enable(), this.cdp.Page.enable(), this.cdp.DOM.enable()]),
+      10000,
+      `worker ${this.id}: CDP domain enable`,
+    );
   }
 
   async evaluate(expression, opts = {}) {
@@ -431,16 +436,24 @@ export async function runCombosParallel({
     queues[i % healthy.length].push(combos[i]);
   }
 
-  // A Ctrl-C / kill mid-sweep skips the finally below and orphans 3-6
-  // TradingView tabs. Register best-effort signal handlers that fire tab-close
-  // requests for every spawned worker. These are fire-and-forget — the process
-  // may exit before the async fetch lands (telemetry.js hard-exits on SIGINT),
-  // but on SIGTERM and slower exits they reclaim the tabs. prependListener so
-  // we at least dispatch the closes ahead of any exit handler. Removed in the
-  // finally so a completed sweep doesn't leak listeners across runs.
-  const _onTerminate = () => { for (const w of workers) { try { _closeTab(w.target_id); } catch {} } };
-  process.prependListener('SIGINT', _onTerminate);
-  process.prependListener('SIGTERM', _onTerminate);
+  // A signal listener suppresses Node's default exit, so this handler must own
+  // both cleanup and definitive termination. Give worker teardown a short
+  // grace period, then exit even if TradingView is unresponsive.
+  let terminating = false;
+  const _terminate = (code) => {
+    if (terminating) return;
+    terminating = true;
+    for (const w of workers) { try { _closeTab(w.target_id); } catch {} }
+    const forceExit = setTimeout(() => process.exit(code), 2000);
+    Promise.allSettled(workers.map((w) => w.destroy())).finally(() => {
+      clearTimeout(forceExit);
+      process.exit(code);
+    });
+  };
+  const _onSigint = () => _terminate(130);
+  const _onSigterm = () => _terminate(143);
+  process.prependListener('SIGINT', _onSigint);
+  process.prependListener('SIGTERM', _onSigterm);
 
   // Each worker drains its queue serially.
   const results = [];
@@ -473,8 +486,8 @@ export async function runCombosParallel({
   } finally {
     // Cleanup MUST run whether the drain resolved or threw — a rejected drain
     // would otherwise leave every worker tab open (the orphaned-tab leak).
-    process.removeListener('SIGINT', _onTerminate);
-    process.removeListener('SIGTERM', _onTerminate);
+    process.removeListener('SIGINT', _onSigint);
+    process.removeListener('SIGTERM', _onSigterm);
     for (const w of workers) {
       if (w.error) cleanup_warnings.push({ stage: 'worker_setup', worker_id: w.id, reason: w.error });
     }

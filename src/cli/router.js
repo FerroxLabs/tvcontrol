@@ -4,6 +4,8 @@
  */
 import { parseArgs } from 'node:util';
 import { CATEGORIES } from '../errors.js';
+import { coordinateCliHandler } from '../core/coordination.js';
+import { flushNow as flushTelemetry } from '../core/telemetry.js';
 
 // Categories that map to exit code 2 (connection / pre-flight failures).
 // Shell scripts can use `if [ $? -eq 2 ]` to retry-with-launch logic.
@@ -15,7 +17,15 @@ const EXIT2_CATEGORIES = new Set([
 /** @type {Map<string, { description: string, options?: object, handler: Function, subcommands?: Map<string, object> }>} */
 const commands = new Map();
 
+function exit(code) {
+  try { flushTelemetry(); } catch { /* preserve the command's real exit */ }
+  process.exit(code);
+}
+
 export function register(name, config) {
+  if (commands.has(name)) {
+    throw new Error(`Duplicate CLI command registration: ${name}`);
+  }
   commands.set(name, config);
 }
 
@@ -75,7 +85,7 @@ export async function run(argv) {
 
   if (args.length === 0 || args[0] === '--help' || args[0] === '-h') {
     printHelp();
-    process.exit(0);
+    exit(0);
   }
 
   const cmdName = args[0];
@@ -84,7 +94,7 @@ export async function run(argv) {
   if (!cmd) {
     console.error(`Unknown command: ${cmdName}`);
     console.error('Run "tv --help" for a list of commands.');
-    process.exit(1);
+    exit(1);
   }
 
   // Handle subcommands (e.g., tv pine get)
@@ -93,13 +103,13 @@ export async function run(argv) {
     const subName = args[1];
     if (!subName || subName === '--help' || subName === '-h') {
       printCommandHelp(cmdName, cmd);
-      process.exit(0);
+      exit(0);
     }
     const sub = cmd.subcommands.get(subName);
     if (!sub) {
       console.error(`Unknown subcommand: ${cmdName} ${subName}`);
       printCommandHelp(cmdName, cmd);
-      process.exit(1);
+      exit(1);
     }
     handler = sub.handler;
     options = sub.options || {};
@@ -109,15 +119,15 @@ export async function run(argv) {
         args: args.slice(2),
         options: { help: { type: 'boolean', short: 'h' }, ...options },
         allowPositionals: true,
-        strict: false,
+        strict: true,
       });
       if (values.help) {
         console.log(`Usage: tv ${cmdName} ${subName}${sub.usage ? ' ' + sub.usage : ' [options]'}\n`);
         console.log(sub.description);
         printOptionsBlock(options);
-        process.exit(0);
+        exit(0);
       }
-      await execute(handler, values, positionals);
+      await execute(coordinateCliHandler(`${cmdName}.${subName}`, handler), values, positionals);
     } catch (err) {
       handleError(err);
     }
@@ -129,13 +139,13 @@ export async function run(argv) {
         args: args.slice(1),
         options: { help: { type: 'boolean', short: 'h' }, ...options },
         allowPositionals: true,
-        strict: false,
+        strict: true,
       });
       if (values.help) {
         printCommandHelp(cmdName, cmd);
-        process.exit(0);
+        exit(0);
       }
-      await execute(handler, values, positionals);
+      await execute(coordinateCliHandler(cmdName, handler), values, positionals);
     } catch (err) {
       handleError(err);
     }
@@ -146,7 +156,7 @@ async function execute(handler, values, positionals) {
   try {
     const result = await handler(values, positionals);
     console.log(JSON.stringify(result, null, 2));
-    process.exit(0);
+    exit(0);
   } catch (err) {
     handleError(err);
   }
@@ -164,10 +174,10 @@ function handleError(err) {
   // error-message rephrasings. Fall back to regex match only for non-classified
   // errors (legacy throw new Error sites).
   if (category && EXIT2_CATEGORIES.has(category)) {
-    process.exit(2);
+    exit(2);
   }
   if (!category && /CDP|connection|ECONNREFUSED|not running/i.test(message)) {
-    process.exit(2);
+    exit(2);
   }
-  process.exit(1);
+  exit(1);
 }

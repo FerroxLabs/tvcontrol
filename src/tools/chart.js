@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { jsonResult, errorResult } from './_format.js';
 import * as core from '../core/chart.js';
+import { ClassifiedError, CATEGORIES } from '../errors.js';
 
 export function registerChartTools(server) {
   server.tool('chart_get_state', 'Get current chart state (symbol, timeframe, chart type, indicators)', {}, async () => {
@@ -31,11 +32,14 @@ export function registerChartTools(server) {
 
   server.tool('chart_manage_indicator', 'Add or remove an indicator/study on the chart', {
     action: z.enum(['add', 'remove']).describe('Action: add or remove'),
-    indicator: z.string().describe('Full indicator name: "Relative Strength Index", "MACD", "Volume", "Moving Average", "Bollinger Bands", "Moving Average Exponential". Short names like RSI/EMA do NOT work.'),
+    indicator: z.string().optional().describe('Full indicator name (required for add): "Relative Strength Index", "MACD", "Volume", "Moving Average", "Bollinger Bands", "Moving Average Exponential". Short names like RSI/EMA do NOT work.'),
     entity_id: z.string().optional().describe('Entity ID to remove (from chart_get_state). Required for remove.'),
     inputs: z.string().optional().describe('JSON string of input overrides for the indicator (e.g., \'{"length": 20}\')'),
   }, async ({ action, indicator, entity_id, inputs }) => {
-    try { return jsonResult(await core.manageIndicator({ action, indicator, entity_id, inputs })); }
+    try {
+      if (action === 'add' && !indicator) throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'indicator is required for add action');
+      return jsonResult(await core.manageIndicator({ action, indicator, entity_id, inputs }));
+    }
     catch (err) { return errorResult(err); }
   });
 

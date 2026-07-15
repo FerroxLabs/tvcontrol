@@ -2,7 +2,7 @@
  * Core streaming logic — real-time JSONL output from TradingView.
  * Uses efficient poll + dedup: only emits when data changes.
  */
-import { evaluate } from '../connection.js';
+import { evaluate, _looksLikeDisconnect } from '../connection.js';
 
 const CHART_API = 'window.TradingViewApi._activeChartWidgetWV.value()';
 const MODEL = `${CHART_API}._chartWidget.model()`;
@@ -26,11 +26,32 @@ function _bindStreamSignalsOnce() {
  * Calls fetcher(), compares to last value, emits JSONL on change.
  * Writes to stdout directly for pipe-friendliness.
  */
+export function _streamReconnectDelay(attempt, random = Math.random) {
+  const exponential = Math.min(30000, 750 * (2 ** Math.max(0, attempt - 1)));
+  const jitter = 0.9 + (0.2 * random());
+  return Math.min(30000, Math.round(exponential * jitter));
+}
+
+export function _abortableStreamSleep(ms, signal) {
+  if (signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(done, ms);
+    function done() {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', done);
+      resolve();
+    }
+    signal?.addEventListener('abort', done, { once: true });
+  });
+}
+
 async function pollLoop(fetcher, { interval = 500, dedupe = true, label = 'stream' } = {}) {
   let lastHash = null;
   let running = true;
+  let disconnectAttempts = 0;
+  const controller = new AbortController();
 
-  const cleanup = () => { running = false; };
+  const cleanup = () => { running = false; controller.abort(); };
   _bindStreamSignalsOnce();
   _activeLoops.add(cleanup);
 
@@ -43,25 +64,43 @@ async function pollLoop(fetcher, { interval = 500, dedupe = true, label = 'strea
   process.stderr.write(`[stream:${label}] started, interval=${interval}ms, Ctrl+C to stop\n`);
 
   while (running) {
+    let data;
     try {
-      const data = await fetcher();
-      if (!data) { await sleep(interval); continue; }
-
-      const hash = dedupe ? JSON.stringify(data) : null;
-      if (!dedupe || hash !== lastHash) {
-        lastHash = hash;
-        const line = JSON.stringify({ ...data, _ts: Date.now(), _stream: label });
-        process.stdout.write(line + '\n');
+      data = await fetcher();
+      if (disconnectAttempts > 0) {
+        process.stderr.write(`[stream:${label}] connection restored after ${disconnectAttempts} attempt${disconnectAttempts === 1 ? '' : 's'}\n`);
+        disconnectAttempts = 0;
       }
     } catch (err) {
-      // Connection errors — retry silently
-      if (/CDP|ECONNREFUSED/i.test(err.message)) {
-        await sleep(2000);
+      // Reuse the transport classifier from connection.js so Node's nested
+      // `TypeError: fetch failed` causes and reset/closed WebSockets all take
+      // the reconnect path, while in-page strategy errors do not.
+      if (_looksLikeDisconnect(err)) {
+        disconnectAttempts += 1;
+        const delay = _streamReconnectDelay(disconnectAttempts);
+        process.stderr.write(`[stream:${label}] disconnected; reconnect attempt ${disconnectAttempts} in ${delay}ms\n`);
+        await _abortableStreamSleep(delay, controller.signal);
         continue;
       }
       process.stderr.write(`[stream:${label}] error: ${err.message}\n`);
+      await _abortableStreamSleep(interval, controller.signal);
+      continue;
     }
-    await sleep(interval);
+
+    if (!data) {
+      await _abortableStreamSleep(interval, controller.signal);
+      continue;
+    }
+
+    // Keep output handling outside the CDP catch. A closed stdout pipe is not
+    // a TradingView disconnect and must never start an endless reconnect loop.
+    const hash = dedupe ? JSON.stringify(data) : null;
+    if (!dedupe || hash !== lastHash) {
+      lastHash = hash;
+      const line = JSON.stringify({ ...data, _ts: Date.now(), _stream: label });
+      process.stdout.write(line + '\n');
+    }
+    await _abortableStreamSleep(interval, controller.signal);
   }
 
   process.stderr.write(`[stream:${label}] stopped after ${((Date.now() - start) / 1000).toFixed(1)}s\n`);

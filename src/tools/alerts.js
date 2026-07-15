@@ -3,12 +3,14 @@ import { jsonResult, errorResult } from './_format.js';
 import * as core from '../core/alerts.js';
 
 export function registerAlertTools(server) {
-  server.tool('alert_create', 'Create a price alert via the TradingView alert dialog', {
-    condition: z.string().describe('Requested alert condition (e.g., "crossing"). NOTE: not yet applied by automation — the alert is created with TradingView\'s default condition and the response returns condition_applied:false. Set precise conditions manually for now.'),
+  server.tool('alert_create', 'Create a price alert on the current chart using TradingView\'s authenticated alert API', {
+    condition: z.string().describe('Condition: crossing, greater_than, or less_than'),
     price: z.coerce.number().describe('Price level for the alert'),
     message: z.string().optional().describe('Alert message'),
-  }, async ({ condition, price, message }) => {
-    try { return jsonResult(await core.create({ condition, price, message })); }
+    mobile_push: z.coerce.boolean().optional().default(true).describe('Enable TradingView mobile push notification'),
+    expiration_days: z.coerce.number().int().min(1).max(365).optional().default(30).describe('Days until expiration'),
+  }, async ({ condition, price, message, mobile_push, expiration_days }) => {
+    try { return jsonResult(await core.create({ condition, price, message, mobile_push, expiration_days })); }
     catch (err) { return errorResult(err); }
   });
 
@@ -19,8 +21,10 @@ export function registerAlertTools(server) {
 
   server.tool('alert_delete', 'Delete all alerts or open context menu for deletion', {
     delete_all: z.coerce.boolean().optional().describe('Delete all alerts'),
-  }, async ({ delete_all }) => {
-    try { return jsonResult(await core.deleteAlerts({ delete_all })); }
+    alert_id: z.union([z.string(), z.number()]).optional().describe('One alert ID to delete'),
+    alert_ids: z.array(z.union([z.string(), z.number()])).max(100).optional().describe('Several alert IDs to delete'),
+  }, async ({ delete_all, alert_id, alert_ids }) => {
+    try { return jsonResult(await core.deleteAlerts({ delete_all, alert_id, alert_ids })); }
     catch (err) { return errorResult(err); }
   });
 

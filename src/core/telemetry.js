@@ -28,6 +28,9 @@ const MAX_LINE_BYTES = 3900;
 // source and asserts each entry is a registered tool name.
 const DEFAULT_EXCLUDE = new Set([
   'tv_health_check',  // polled constantly by health checks
+  'tv_compatibility_check', // canary is also safe to poll continuously
+  'tv_watchdog_status', // polled by watchdog observers
+  'tv_watchdog_history', // read-only local incident history
   'chart_get_state',  // polled by every read workflow
 ]);
 
@@ -172,12 +175,10 @@ function rotateIfNeeded(path) {
   } catch { /* best effort */ }
 }
 
-// Flush on every reasonable exit path so users with TV_MCP_TELEMETRY=1
-// don't lose their session log to Ctrl-C or an uncaught exception (which
-// is exactly the case telemetry was meant to capture).
+// Flush on natural exit and uncaught failure. Signal ownership belongs to the
+// CLI/server surface: installing a passive SIGINT/SIGTERM handler here would
+// suppress Node's default termination for every ordinary CLI command.
 process.on('beforeExit', () => flushNow());
-process.on('SIGTERM', () => flushNow());
-process.on('SIGINT', () => { flushNow(); process.exit(130); });
 process.on('uncaughtException', (err) => {
   // Best-effort flush, then re-raise so the runtime takes its default action
   // (process exits with code 1 and prints the stack).

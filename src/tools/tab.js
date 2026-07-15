@@ -8,8 +8,11 @@ export function registerTabTools(server) {
     catch (err) { return errorResult(err); }
   });
 
-  server.tool('tab_new', 'Open a new chart tab', {}, async () => {
-    try { return jsonResult(await core.newTab()); }
+  server.tool('tab_new', 'Open a new TradingView tab, optionally loading a saved layout', {
+    layout: z.string().optional().describe('Saved layout name or "new" for a blank chart'),
+    name: z.string().optional().describe('Symbol name to enter when layout is "new"'),
+  }, async ({ layout, name }) => {
+    try { return jsonResult(await core.newTab({ layout, name })); }
     catch (err) { return errorResult(err); }
   });
 

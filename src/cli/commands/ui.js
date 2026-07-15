@@ -70,6 +70,7 @@ register('ui', {
       description: 'Execute JavaScript in TradingView page context',
       usage: '<expression>',
       handler: (opts, positionals) => {
+        _arg(process.env.TV_MCP_ADVANCED === '1', 'ui eval is disabled. Set TV_MCP_ADVANCED=1 only when arbitrary page-context JavaScript is explicitly required.');
         _arg(positionals[0], 'Expression required. Usage: tv ui eval "1+1"');
         return core.uiEvaluate({ expression: positionals.join(' ') });
       },

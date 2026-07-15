@@ -18,6 +18,8 @@ function _resolve(deps) {
     evaluate: deps?.evaluate || _evaluate,
     evaluateAsync: deps?.evaluateAsync || _evaluateAsync,
     waitForChartReady: deps?.waitForChartReady || _waitForChartReady,
+    sleep: deps?.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
+    fetch: deps?.fetch || globalThis.fetch,
   };
 }
 
@@ -56,6 +58,7 @@ export async function setSymbol({ symbol, _deps }) {
     })()
   `);
   const ready = await waitForChartReady(symbol);
+  if (!ready) throw new ClassifiedError(CATEGORIES.CHART_LOADING, `Chart did not finish loading symbol ${symbol}`);
   return { success: true, symbol, chart_ready: ready };
 }
 
@@ -68,6 +71,7 @@ export async function setTimeframe({ timeframe, _deps }) {
     })()
   `);
   const ready = await waitForChartReady(null, timeframe);
+  if (!ready) throw new ClassifiedError(CATEGORIES.CHART_LOADING, `Chart did not finish loading timeframe ${timeframe}`);
   return { success: true, timeframe, chart_ready: ready };
 }
 
@@ -145,7 +149,8 @@ export async function manageIndicator({ action, indicator, entity_id, inputs: in
   }
 }
 
-export async function getVisibleRange() {
+export async function getVisibleRange({ _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
   const result = await evaluate(`
     (function() {
       var chart = ${CHART_API};
@@ -156,9 +161,41 @@ export async function getVisibleRange() {
 }
 
 export async function setVisibleRange({ from, to, _deps }) {
-  const { evaluate } = _resolve(_deps);
+  const { evaluate, sleep } = _resolve(_deps);
   const f = requireFinite(from, 'from');
   const t = requireFinite(to, 'to');
+  if (f >= t) throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'from must be earlier than to');
+
+  const history = { requests: 0, earliest_loaded: null, reached_from: false, exhausted: false };
+  for (let attempt = 0; attempt < 25; attempt++) {
+    const state = await evaluate(`
+      (function() {
+        var series = ${CHART_API}._chartWidget.model().mainSeries();
+        var bars = series.bars();
+        var first = bars.valueAt(bars.firstIndex());
+        var more = true;
+        try { more = series.requestMoreDataAvailable(); } catch (e) {}
+        return { firstTime: first && first[0], more: more };
+      })()
+    `);
+    history.earliest_loaded = state?.firstTime ?? history.earliest_loaded;
+    if (state?.firstTime != null && state.firstTime <= f) {
+      history.reached_from = true;
+      break;
+    }
+    if (!state?.more) {
+      history.exhausted = true;
+      break;
+    }
+    await evaluate(`
+      (function() {
+        try { ${CHART_API}._chartWidget.model().mainSeries().requestMoreData(1000); return true; }
+        catch (e) { return false; }
+      })()
+    `);
+    history.requests += 1;
+    await sleep(1800);
+  }
   await evaluate(`
     (function() {
       var chart = ${CHART_API};
@@ -176,7 +213,7 @@ export async function setVisibleRange({ from, to, _deps }) {
       ts.zoomToBarsRange(fromIdx, toIdx);
     })()
   `);
-  await new Promise(r => setTimeout(r, 500));
+  await sleep(500);
   const actual = await evaluate(`
     (function() {
       var chart = ${CHART_API};
@@ -184,10 +221,20 @@ export async function setVisibleRange({ from, to, _deps }) {
       catch(e) { return { from: 0, to: 0, error: e.message }; }
     })()
   `);
-  return { success: true, requested: { from, to }, actual: actual || { from: 0, to: 0 } };
+  const actualRange = actual || { from: 0, to: 0 };
+  const complete = !!actualRange.from && actualRange.from <= f;
+  return {
+    success: true,
+    complete,
+    requested: { from: f, to: t },
+    actual: actualRange,
+    history,
+    ...(complete ? {} : { note: 'TradingView could not load the entire requested range; actual shows the range that was available.' }),
+  };
 }
 
-export async function scrollToDate({ date }) {
+export async function scrollToDate({ date, _deps }) {
+  const { evaluate, sleep } = _resolve(_deps);
   let timestamp;
   if (/^\d+$/.test(date)) timestamp = Number(date);
   else timestamp = Math.floor(new Date(date).getTime() / 1000);
@@ -222,11 +269,12 @@ export async function scrollToDate({ date }) {
       ts.zoomToBarsRange(fromIdx, toIdx);
     })()
   `);
-  await new Promise(r => setTimeout(r, 500));
+  await sleep(500);
   return { success: true, date, centered_on: timestamp, resolution, window: { from, to } };
 }
 
-export async function symbolInfo() {
+export async function symbolInfo({ _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
   const result = await evaluate(`
     (function() {
       var chart = ${CHART_API};
@@ -241,7 +289,8 @@ export async function symbolInfo() {
   return { success: true, ...result };
 }
 
-export async function symbolSearch({ query, type }) {
+export async function symbolSearch({ query, type, _deps }) {
+  const { fetch } = _resolve(_deps);
   // Use TradingView's public symbol search REST API (works without auth)
   const params = new URLSearchParams({
     text: query,
@@ -252,9 +301,19 @@ export async function symbolSearch({ query, type }) {
     domain: 'production',
   });
 
-  const resp = await fetch(`https://symbol-search.tradingview.com/symbol_search/v3/?${params}`, {
-    headers: { 'Origin': 'https://www.tradingview.com', 'Referer': 'https://www.tradingview.com/' },
-  });
+  let resp;
+  try {
+    resp = await fetch(`https://symbol-search.tradingview.com/symbol_search/v3/?${params}`, {
+      headers: { 'Origin': 'https://www.tradingview.com', 'Referer': 'https://www.tradingview.com/' },
+      signal: globalThis.AbortSignal.timeout(10_000),
+    });
+  } catch (err) {
+    throw new ClassifiedError(
+      CATEGORIES.API_UNEXPECTED,
+      `TradingView symbol search failed: ${err?.name === 'TimeoutError' ? 'timed out after 10000ms' : err.message}`,
+      { cause: err, hint: 'Check network access to symbol-search.tradingview.com and retry.' },
+    );
+  }
   if (!resp.ok) throw new ClassifiedError(CATEGORIES.API_UNEXPECTED, `Symbol search API returned ${resp.status}`);
   const data = await resp.json();
 
