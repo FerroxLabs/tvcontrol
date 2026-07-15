@@ -30,6 +30,7 @@ All notable changes to TVControl are documented here. This project follows [Sema
 - Watchlist, alert, batch, capture, chart-range, stream, Pine, and sweep paths gained stricter validation, bounded waits, and cleanup reporting.
 - Windows launch supports Store/MSIX installations and a versioned local fallback when the protected package cannot expose CDP.
 - CI now runs lint, offline tests, dependency audit, and package checks on Linux, macOS, and Windows with Node 18 and 22.
+- CI uses the Node 24-based official checkout and setup-node action runtimes.
 - Offline Pine API checks were separated from live public-service compilation checks so the default suite remains deterministic.
 - Dependencies are pinned and package contents are controlled by an explicit npm `files` allowlist.
 
