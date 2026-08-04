@@ -2,6 +2,17 @@
 
 All notable changes to TVControl are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [2.2.1] - 2026-08-04
+
+### Fixed
+
+- `tools/list` no longer fails, so MCP clients see the full tool catalog again. In 2.2.0 the request answered `-32603 Cannot read properties of undefined (reading '_zod')` and every host — Claude Code, Codex, Cursor, Wayland — reported zero tools. The cause was a one-argument `z.record()` in `strategy_sweep`: valid under Zod 3, invalid under Zod 4, which requires an explicit key type. The CLI was never affected.
+- `zod` is now a declared dependency pinned to `4.3.6`. It was previously imported in 17 source files but resolved transitively through the MCP SDK, so the SDK's own dependency range decided which major version TVControl ran against — which is how a Zod major landed without a TVControl change.
+
+### Added
+
+- `tests/mcp_stdio.test.js` drives `initialize` and `tools/list` against `src/server.js` over real stdio, with an empty environment and a foreign working directory, and checks that every published tool converts to a usable JSON Schema. No previous test spoke MCP: the CLI and core paths never perform schema conversion, so the entire offline suite passed while the MCP server was unusable.
+
 ## [2.2.0] - 2026-07-15
 
 ### Added
