@@ -10,7 +10,7 @@ export function registerSweepTools(server) {
   server.tool('strategy_sweep', 'Iterate a strategy across symbols × timeframes × indicator input combinations', {
     symbols: z.array(z.string()).min(1).describe('Symbols to sweep (e.g. ["ES1!", "NQ1!"])'),
     timeframes: z.array(z.string()).min(1).describe('Timeframes to sweep (e.g. ["15", "60"])'),
-    inputs: z.record(z.array(z.union([z.string(), z.number()]))).optional()
+    inputs: z.record(z.string(), z.array(z.union([z.string(), z.number()]))).optional()
       .describe('Input variations: { length: [20, 50], source: ["close", "hl2"] }'),
     entity_id: z.string().describe('Strategy study entity ID (from chart_get_state)'),
     max_combinations: z.coerce.number().int().min(1).max(500).optional()

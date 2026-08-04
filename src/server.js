@@ -26,7 +26,7 @@ import { registerSweepTools } from './tools/sweep.js';
 const server = new McpServer(
   {
     name: 'tvcontrol',
-    version: '2.2.0',
+    version: '2.2.1',
     description: 'AI remote control for TradingView Desktop — 102 MCP tools driving symbols, indicators, Pine Script, snapshots, sweeps, diagnostics, and live chart vision over CDP.',
   },
   {
