@@ -267,12 +267,22 @@ function _cleanSymbols(symbols) {
 // So resolve first and post the resolved form. If it cannot be resolved, that
 // is a caller error worth stopping on, not a broken row worth creating.
 async function _resolveBare(sym, _deps) {
-  if (sym.includes(':')) return sym;           // already exchange-qualified
-  if (_isHeader(sym)) return sym;              // section furniture, not a symbol
+  if (sym.includes(':')) return { resolved: sym, from: sym, alternatives: [] };
+  if (_isHeader(sym)) return { resolved: sym, from: sym, alternatives: [] };
   let found;
+  let alternatives = [];
   try {
     const r = await symbolSearch({ query: sym, _deps });
-    found = (r.results || []).find((x) => String(x.symbol).toUpperCase() === sym.toUpperCase());
+    const exact = (r.results || []).filter((x) => String(x.symbol).toUpperCase() === sym.toUpperCase());
+    found = exact[0];
+    // A ticker usually exists on several exchanges: KO is NYSE, but also a
+    // German and a Turkish listing. Taking exact[0] follows TradingView's own
+    // relevance ranking, which is what its autocomplete does — but doing it
+    // SILENTLY is the problem. removeBulk refuses an ambiguous bare ticker
+    // because deleting the wrong row is unrecoverable; adding the wrong row is
+    // not, so this resolves and then says out loud what it chose and what else
+    // it could have chosen.
+    alternatives = exact.slice(1).map((x) => x.full_name).filter(Boolean);
   } catch (err) {
     throw new ClassifiedError(
       CATEGORIES.INVALID_ARGUMENT,
@@ -287,7 +297,7 @@ async function _resolveBare(sym, _deps) {
       { hint: 'Call symbol_search to find the exchange-prefixed name, then pass that.' },
     );
   }
-  return found.full_name;
+  return { resolved: found.full_name, from: sym, alternatives };
 }
 
 // Both mutations read the active list before and after. If the operator (or
@@ -321,6 +331,10 @@ export async function add({ symbol, _deps }) {
       { hint: 'TradingView may have rejected the symbol. Confirm the exchange-prefixed spelling with symbol_search.' },
     );
   }
+  // addBulk discloses which bare tickers it resolved and what it passed over.
+  // Dropping that here would hide it on the single-symbol path, which is the
+  // one most callers actually use.
+  const resolution = (res.resolved || [])[0];
   return {
     success: true,
     symbol: (one && one.symbol) || symbol,
@@ -328,6 +342,7 @@ export async function add({ symbol, _deps }) {
     watchlist: res.watchlist,
     count: res.count,
     verified: res.verified,
+    ...(resolution ? { resolved_from: resolution.from, alternatives: resolution.alternatives } : {}),
   };
 }
 
@@ -340,8 +355,12 @@ export async function addBulk({ symbols, _deps }) {
   // Resolve bare tickers BEFORE the membership check, so "AAPL" is compared
   // against the stored "NASDAQ:AAPL" rather than being posted as a new row.
   const resolved = [];
+  const resolutions = [];
   for (const sym of requested) {
-    resolved.push(had.has(sym) ? sym : await _resolveBare(sym, _deps));
+    if (had.has(sym)) { resolved.push(sym); continue; }
+    const r = await _resolveBare(sym, _deps);
+    resolved.push(r.resolved);
+    if (r.resolved !== r.from) resolutions.push({ from: r.from, to: r.resolved, alternatives: r.alternatives });
   }
   const wanted = [...new Set(resolved)];
   const missing = wanted.filter((x) => !had.has(x));
@@ -361,6 +380,10 @@ export async function addBulk({ symbols, _deps }) {
     count: after.symbols.filter((x) => !_isHeader(x)).length,
     added_count: results.filter((r) => r.added && !r.already_present).length,
     not_added: results.filter((r) => !r.added).map((r) => r.symbol),
+    // Say which bare tickers were resolved and to what, plus the listings that
+    // were passed over. Silence here means the caller cannot tell NYSE:KO from
+    // a Frankfurt listing of the same ticker.
+    ...(resolutions.length ? { resolved: resolutions } : {}),
     results,
     verified: allThere,
     source: 'symbols_list_api',
@@ -592,27 +615,56 @@ export async function importFrom({ file_path, mode = 'merge', dry_run = false, _
   const errors = [];
 
   if (mode === 'replace') {
-    // Remove symbols not in incoming
+    // Remove everything not in incoming — INCLUDING section headers.
+    //
+    // This loop used to iterate current.symbols, which get() strips headers out
+    // of. So a "replace" left every existing header in place, and then the add
+    // loop below, working from a header-free currentSet, appended the incoming
+    // headers on top of them. Replace produced DUPLICATE sections and called it
+    // restored. current.entries is the stored list verbatim, headers included,
+    // which is what replace has to operate on.
     const incomingSet = new Set(incoming);
-    for (const s of current.symbols) {
-      if (!incomingSet.has(s.symbol)) {
-        try {
-          // remove() throws when its own verify read fails, but check the
-          // returned flag too: this loop is the layer where a failure that is
-          // merely REPORTED rather than thrown used to disappear.
-          const r = await remove({ symbol: s.symbol, _deps });
-          if (r && r.success === false) {
-            errors.push({ symbol: s.symbol, error: 'removal was not confirmed by the follow-up read' });
+    const existing = current.entries && current.entries.length
+      ? current.entries.map(String)
+      : current.symbols.map((s) => s.symbol);
+    for (const entry of existing) {
+      if (incomingSet.has(entry)) continue;
+      try {
+        if (_isHeader(entry)) {
+          // Headers are not instruments, so they do not go through remove()'s
+          // symbol handling. Post and confirm from a fresh read.
+          const { evaluateAsync } = _resolve(_deps);
+          const beforeH = await _apiActive(evaluateAsync);
+          await _apiMutate(evaluateAsync, beforeH.id, 'remove', [entry]);
+          const afterH = await _apiActive(evaluateAsync);
+          // Same guard the symbol paths carry: if the active list switched
+          // mid-operation, the "after" read describes a different list and can
+          // answer for the wrong one in either direction.
+          _assertSameList(beforeH, afterH, 'section removal');
+          if (afterH.symbols.map(String).includes(entry)) {
+            errors.push({ symbol: entry, error: 'the section header was not removed' });
           }
-        } catch (err) {
-          errors.push({ symbol: s.symbol, error: err.message });
+          continue;
         }
+        // remove() throws when its own verify read fails, but check the
+        // returned flag too: this loop is the layer where a failure that is
+        // merely REPORTED rather than thrown used to disappear.
+        const r = await remove({ symbol: entry, _deps });
+        if (r && r.success === false) {
+          errors.push({ symbol: entry, error: 'removal was not confirmed by the follow-up read' });
+        }
+      } catch (err) {
+        errors.push({ symbol: entry, error: err.message });
       }
     }
-    // Refresh current set after removals
+    // Refresh from the ENTRIES, headers included, so a header that survived is
+    // not appended a second time.
     currentSet.clear();
     const refreshed = await get({ _deps });
-    for (const s of refreshed.symbols) currentSet.add(s.symbol);
+    const refreshedEntries = refreshed.entries && refreshed.entries.length
+      ? refreshed.entries.map(String)
+      : refreshed.symbols.map((s) => s.symbol);
+    for (const e of refreshedEntries) currentSet.add(e);
   }
 
   const sections_restored = [];
@@ -629,6 +681,7 @@ export async function importFrom({ file_path, mode = 'merge', dry_run = false, _
         const beforeH = await _apiActive(evaluateAsync);
         await _apiMutate(evaluateAsync, beforeH.id, 'append', [sym]);
         const afterH = await _apiActive(evaluateAsync);
+        _assertSameList(beforeH, afterH, 'section restore');
         if (afterH.symbols.map(String).includes(sym)) {
           sections_restored.push(sym);
           currentSet.add(sym);
@@ -669,6 +722,15 @@ export async function importFrom({ file_path, mode = 'merge', dry_run = false, _
     skipped_count: skipped.length,
     sections_restored,
     section_count: sections_restored.length,
+    // HONEST LIMIT. The API is append-only at the end of the list, so import
+    // restores MEMBERSHIP faithfully but can only restore ORDER when it is
+    // building a list from empty. Importing into a populated list puts new
+    // headers at the end, which is not where the file had them. Saying
+    // "sections restored" without this would be a claim the mechanism cannot
+    // support.
+    ...(sections_restored.length && currentSet.size > sections_restored.length
+      ? { order_note: 'Section headers were appended at the end of the list. Order is only reproduced when importing into an empty watchlist.' }
+      : {}),
     error_count: errors.length,
     errors,
   };

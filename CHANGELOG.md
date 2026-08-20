@@ -112,6 +112,55 @@ as what they are: anti-reversion tripwires, not evidence of correctness.
 `NYSE:KO` and removed, garbage ticker refused, alerts 164 → 165 → 164, phantom
 delete refused, export round-trip preserving all 39 entries and 10 sections.
 
+### Fixed — second audit round, on the fixes themselves
+
+The 2.2.6 fixes were put back through the same adversarial review that rejected
+2.2.5. It found four more, three of them in code written that same night.
+
+- **`watchlist_import` in `replace` mode duplicated every section header.** The
+  removal loop iterated the header-free symbol list, so existing headers were
+  never removed; the add loop then worked from a header-free set and appended
+  the incoming headers on top of them. A "replace" produced two of each section
+  and reported them as restored. Replace now operates on the stored entries,
+  headers included.
+- **`watchlist_add` hid which listing it picked.** A bare ticker usually exists
+  on several exchanges — `KO` is NYSE, and also Frankfurt. `addBulk` disclosed
+  the choice and the alternatives; `add`, which is what `watchlist_add`
+  actually calls, dropped them. Both report `resolved_from` and `alternatives`
+  now.
+- **You could add a symbol you could not then remove.** `add("KO")` resolved and
+  stored `NYSE:KO`; `remove("KO")` did not resolve, found nothing spelled `KO`,
+  and reported that the symbol was not in the watchlist, which was false.
+  `removeBulk` now matches a bare ticker against the list it just read — a local
+  match, not a search call. An ambiguous ticker is refused rather than guessed,
+  because deleting the wrong row is not recoverable.
+- **The section header paths skipped the same-list guard** that the symbol paths
+  carry, so a watchlist switched mid-operation could have the wrong list answer
+  for whether a header landed.
+
+### Changed
+
+- `alert_create` deliberately does **not** throw when its confirmation read
+  fails, while `alert_delete_by_id` does. The asymmetry was flagged in review
+  and kept: the safe response to an unconfirmed delete is to look and retry,
+  but retrying an unconfirmed create makes a second alert. Creation reports
+  `verified: null` with a note explaining why not to retry blind.
+- `watchlist_import` no longer claims more than it can deliver. The API appends
+  at the end of the list, so import restores membership faithfully but can only
+  reproduce *order* when building from empty. It says so now.
+
+### Tests
+
+Mutation testing on the new suite found a test that could not fail for the
+reason it claimed. "deleteById throws when the verification read fails" broke
+*every* list read, so it threw at the pre-delete presence check and never
+reached the post-delete verification — meaning the original 2.2.5 bug could have
+been reintroduced in the post-delete path with the whole suite still green. The
+mock can now fail from the Nth read onward, and the replacement test was
+confirmed to fail against that exact mutation.
+
+580 offline tests.
+
 ## [2.2.5] - 2026-08-20
 
 ### Fixed

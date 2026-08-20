@@ -117,9 +117,22 @@ export async function create({ condition = 'crossing', price, message, mobile_pu
 
   // The create response is the action reporting on itself. Confirm the alert
   // exists from a separate read, the same rule the delete path follows.
+  //
+  // DELIBERATE ASYMMETRY WITH deleteById, flagged in review as an
+  // inconsistency and kept on purpose. deleteById THROWS when its verification
+  // read fails, because the safe response to an unconfirmed delete is to look
+  // and try again. Creation is not like that: the POST already returned an
+  // alert_id, so the alert probably exists, and throwing would invite a retry
+  // that creates a SECOND one. Silently duplicating a trader's alerts is worse
+  // than admitting the confirmation could not be read. So this reports
+  // verified: null with an explicit note and lets the caller decide.
   let verified = null;
+  let verify_note;
   if (result.alert_id) {
     const present = await _presentIds({ _deps });
+    if (present === null) {
+      verify_note = 'The alert was accepted and given an id, but the alert list could not be re-read, so its existence is unconfirmed. Call alert_list before retrying: retrying blind would create a duplicate.';
+    }
     if (present !== null) {
       verified = present.has(String(result.alert_id));
       if (!verified) {
@@ -138,6 +151,7 @@ export async function create({ condition = 'crossing', price, message, mobile_pu
     symbol: result.symbol,
     alert_id: result.alert_id || null,
     verified,
+    ...(verify_note ? { verify_note } : {}),
     condition: conditionType,
     condition_applied: true,
     price: numericPrice,
