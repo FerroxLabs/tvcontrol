@@ -2,6 +2,16 @@
 
 All notable changes to TVControl are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [2.2.5] - 2026-08-20
+
+### Fixed
+
+- **`chart_get_state` now returns `chart_type` as well as `chartType`.** The same value was called `chartType` here, `chart_type` in `symbol_info`, and taken as `chart_type` by `chart_set_type` — one value, three places, two spellings. An agent that learns the name from `chart_get_state` reads `undefined` everywhere else. That happened twice while sweeping the tool surface, and both times produced a false "this tool is broken" conclusion about a tool that worked perfectly. Both keys are emitted so nothing breaks; snake_case is canonical.
+
+### Notes
+
+- 2.2.4 was tagged but never published to npm. Publish 2.2.5 instead; it contains everything 2.2.4 did.
+
 ## [2.2.4] - 2026-08-20
 
 Found by calling all 101 registered tools against a live account and verifying each effect from an independent read, rather than by reading code. Three of them were broken in ways that reported success or returned nothing usable.

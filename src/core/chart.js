@@ -38,6 +38,14 @@ export async function getState({ _deps } = {}) {
       return {
         symbol: chart.symbol(),
         resolution: chart.resolution(),
+        // BOTH SPELLINGS, DELIBERATELY. This field shipped as chartType
+        // while symbol_info returns the same value as chart_type, and
+        // chart_set_type takes chart_type as its argument. One value, three
+        // places, two names, so an agent that learns the name here reads
+        // undefined everywhere else. snake_case is canonical; the camelCase
+        // key stays so existing callers do not break.
+        // (No backticks in this comment: it lives inside a template literal.)
+        chart_type: chart.chartType(),
         chartType: chart.chartType(),
         studies: studies,
       };
