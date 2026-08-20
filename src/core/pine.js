@@ -880,7 +880,11 @@ export async function openScript({ name }) {
   return { success: true, name: result.name, script_id: result.id, lines: result.lines, source: 'internal_api', opened: true };
 }
 
-export async function listScripts() {
+export async function listScripts({ name_filter, limit = 50, offset = 0 } = {}) {
+  // MEASURED: this returned 53,933 bytes on a real account, roughly 13,500
+  // tokens, on EVERY call. A tool that blows the context budget is worse than a
+  // missing one, because the agent tries anyway and pays for it. Filtering and
+  // pagination are the whole fix; the underlying fetch is fine.
   const scripts = await evaluateAsync(`
     fetch('https://pine-facade.tradingview.com/pine-facade/list/?filter=saved', { credentials: 'include' })
       .then(function(r) { return r.json(); })
@@ -901,11 +905,31 @@ export async function listScripts() {
       .catch(function(e) { return {scripts: [], error: e.message}; })
   `);
 
+  const all = scripts?.scripts || [];
+  const needle = typeof name_filter === 'string' ? name_filter.trim().toLowerCase() : '';
+  const matched = needle
+    ? all.filter((x) => `${x.name || ''} ${x.title || ''}`.toLowerCase().includes(needle))
+    : all;
+
+  const start = Math.max(0, Number(offset) || 0);
+  const size = Math.min(Math.max(1, Number(limit) || 50), 200);
+  const page = matched.slice(start, start + size);
+
   return {
     success: true,
-    scripts: scripts?.scripts || [],
-    count: scripts?.scripts?.length || 0,
+    scripts: page,
+    count: page.length,
+    total: all.length,
+    matched: matched.length,
+    offset: start,
+    limit: size,
+    // Say plainly when the answer is incomplete. Silent truncation reads as
+    // "that is all of them", which is how an agent concludes a script is gone.
+    truncated: start + page.length < matched.length,
+    ...(start + page.length < matched.length
+      ? { next_offset: start + page.length, hint: `${matched.length - (start + page.length)} more. Re-call with offset=${start + page.length}, or pass name_filter to narrow.` }
+      : {}),
+    ...(scripts?.error ? { error: scripts.error } : {}),
     source: 'internal_api',
-    error: scripts?.error,
   };
 }

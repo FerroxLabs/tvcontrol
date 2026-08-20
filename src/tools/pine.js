@@ -54,8 +54,12 @@ export function registerPineTools(server) {
     catch (err) { return jsonResult({ success: false, source: 'internal_api', error: err.message }, true); }
   });
 
-  server.tool('pine_list_scripts', 'List saved Pine Scripts', {}, async () => {
-    try { return jsonResult(await core.listScripts()); }
+  server.tool('pine_list_scripts', 'List saved Pine Scripts. Returns a page, not the whole library — pass name_filter to find one by name.', {
+    name_filter: z.string().optional().describe('Case-insensitive substring match on script name/title. Use this when you know roughly what you are looking for.'),
+    limit: z.coerce.number().int().min(1).max(200).optional().default(50).describe('Max scripts to return (default 50, max 200)'),
+    offset: z.coerce.number().int().min(0).optional().default(0).describe('Skip this many matches, for paging'),
+  }, async ({ name_filter, limit, offset }) => {
+    try { return jsonResult(await core.listScripts({ name_filter, limit, offset })); }
     catch (err) { return errorResult(err); }
   });
 
