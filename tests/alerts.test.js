@@ -18,8 +18,14 @@ describe('create()', () => {
       price: 500,
       message: 'Breakout',
       _deps: {
+        // create() now re-reads the alert list to confirm the alert exists.
+        // The POST response is the action reporting on itself; it is not
+        // evidence that anything was created.
         evaluateAsync: async (expression) => {
           calls.push(expression);
+          if (expression.includes('list_alerts')) {
+            return { alerts: [{ alert_id: 'a1', symbol: 'NASDAQ:AAPL' }] };
+          }
           return { ok: true, symbol: 'NASDAQ:AAPL', message: 'Breakout', alert_id: 'a1' };
         },
       },
@@ -28,6 +34,7 @@ describe('create()', () => {
     assert.equal(result.condition, 'greater');
     assert.equal(result.condition_applied, true);
     assert.equal(result.mobile_push, true);
+    assert.equal(result.verified, true, 'a fresh read must confirm the alert exists');
     assert.match(calls[0], /pricealerts\.tradingview\.com\/create_alert/);
   });
 

@@ -210,6 +210,9 @@ export async function get({ _deps } = {}) {
     count: symbols.length,
     symbols: enriched,
     sections,
+    // The stored list VERBATIM, headers included and in order. A backup that
+    // drops section structure is not a backup of this watchlist.
+    entries: api.symbols.map(String),
     // True only when a symbol IN THIS LIST actually carries a price.
     quotes_available: matchedQuotes > 0,
     quotes_matched: matchedQuotes,
@@ -468,7 +471,7 @@ export async function exportTo({ file_path, _deps } = {}) {
 
   if (!_isPathAllowed(filePath)) {
     throw new ClassifiedError(
-      CATEGORIES.API_UNEXPECTED,
+      CATEGORIES.INVALID_ARGUMENT,
       `Path rejected: ${filePath}. Paths must not contain ".." and absolute paths must be under home directory or /tmp.`,
     );
   }
@@ -477,7 +480,19 @@ export async function exportTo({ file_path, _deps } = {}) {
 
   const result = await get({ _deps });
   const exported_at = new Date().toISOString();
-  const payload = { schema_version: 1, exported_at, symbols: result.symbols };
+  // schema_version 2 adds `entries`: the stored list verbatim, headers in place
+  // and in order. Version 1 kept only the tradable symbols, so an export ->
+  // replace-import round-trip silently destroyed the operator's section
+  // structure — ten headers, on the live account this was measured against.
+  // `symbols` stays for readers of the old shape.
+  const payload = {
+    schema_version: 2,
+    exported_at,
+    watchlist: result.watchlist,
+    symbols: result.symbols,
+    entries: result.entries || result.symbols.map((x) => x.symbol),
+    sections: result.sections || [],
+  };
 
   // Unique tmp suffix prevents concurrent exports from overwriting each
   // other's sidecar file — was a known race on the hardcoded `.tmp` name.
@@ -486,40 +501,61 @@ export async function exportTo({ file_path, _deps } = {}) {
   writeFileSync(tmp, JSON.stringify(payload, null, 2), 'utf8');
   renameSync(tmp, filePath);
 
-  return { success: true, file_path: filePath, count: result.symbols.length, exported_at };
+  return {
+    success: true,
+    file_path: filePath,
+    count: result.symbols.length,
+    section_count: (result.sections || []).length,
+    schema_version: 2,
+    exported_at,
+  };
 }
 
 export async function importFrom({ file_path, mode = 'merge', dry_run = false, _deps } = {}) {
   // Mirror the allowlist exportTo enforces — without this gate, importFrom
   // could read arbitrary JSON from anywhere on the filesystem (e.g.
   // ~/.ssh/-shaped files, /etc/*) and reflect contents back to the caller.
+  // A bad path, a missing file or malformed JSON are CALLER errors. Filing
+  // them under API_UNEXPECTED sent people to look at TradingView for a typo in
+  // their own argument.
   if (!_isPathAllowed(file_path)) {
     throw new ClassifiedError(
-      CATEGORIES.API_UNEXPECTED,
+      CATEGORIES.INVALID_ARGUMENT,
       `Path rejected: ${file_path}. Paths must resolve under home directory or system tmp.`,
     );
   }
   if (!existsSync(file_path)) {
-    throw new ClassifiedError(CATEGORIES.API_UNEXPECTED, `File not found: ${file_path}`);
+    throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, `File not found: ${file_path}`);
   }
 
   let parsed;
   try {
     parsed = parseJsonSafe(readFileSync(file_path, 'utf8'));
   } catch {
-    throw new ClassifiedError(CATEGORIES.API_UNEXPECTED, `Failed to parse JSON from: ${file_path}`);
+    throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, `Failed to parse JSON from: ${file_path}`);
   }
 
-  if (parsed?.schema_version !== 1 || !Array.isArray(parsed?.symbols)) {
+  const version = parsed?.schema_version;
+  if ((version !== 1 && version !== 2) || !Array.isArray(parsed?.symbols)) {
     throw new ClassifiedError(
-      CATEGORIES.API_UNEXPECTED,
-      'Invalid file shape. Expected { schema_version: 1, symbols: [...] }.',
+      CATEGORIES.INVALID_ARGUMENT,
+      'Invalid file shape. Expected { schema_version: 1 | 2, symbols: [...] }.',
     );
   }
 
-  const incoming = parsed.symbols.map(s => s.symbol).filter(Boolean);
+  // Version 2 carries `entries`: the stored list verbatim, section headers in
+  // place. Replaying those restores the operator's structure instead of
+  // flattening ten sections into an undifferentiated list. Confirmed live on
+  // 2026-08-20 that the append endpoint accepts a ### header entry.
+  const incoming = Array.isArray(parsed.entries) && parsed.entries.length
+    ? parsed.entries.map(String).filter(Boolean)
+    : parsed.symbols.map(s => s.symbol).filter(Boolean);
   const current = await get({ _deps });
-  const currentSet = new Set(current.symbols.map(s => s.symbol));
+  // Compare against the STORED entries, headers included, so a section that is
+  // already there is skipped rather than duplicated.
+  const currentSet = new Set(current.entries && current.entries.length
+    ? current.entries.map(String)
+    : current.symbols.map(s => s.symbol));
 
   if (dry_run) {
     const would_add = incoming.filter(s => !currentSet.has(s));
@@ -555,9 +591,29 @@ export async function importFrom({ file_path, mode = 'merge', dry_run = false, _
     for (const s of refreshed.symbols) currentSet.add(s.symbol);
   }
 
+  const sections_restored = [];
   for (const sym of incoming) {
     if (currentSet.has(sym)) {
       skipped.push(sym);
+      continue;
+    }
+    if (_isHeader(sym)) {
+      // A header is list furniture, not an instrument, so it must not go
+      // through symbol resolution. Post it directly and confirm from a read.
+      try {
+        const { evaluateAsync } = _resolve(_deps);
+        const beforeH = await _apiActive(evaluateAsync);
+        await _apiMutate(evaluateAsync, beforeH.id, 'append', [sym]);
+        const afterH = await _apiActive(evaluateAsync);
+        if (afterH.symbols.map(String).includes(sym)) {
+          sections_restored.push(sym);
+          currentSet.add(sym);
+        } else {
+          errors.push({ symbol: sym, error: 'the section header was not confirmed by the follow-up read' });
+        }
+      } catch (err) {
+        errors.push({ symbol: sym, error: err.message });
+      }
       continue;
     }
     try {
@@ -587,6 +643,8 @@ export async function importFrom({ file_path, mode = 'merge', dry_run = false, _
     skipped,
     added_count: added.length,
     skipped_count: skipped.length,
+    sections_restored,
+    section_count: sections_restored.length,
     error_count: errors.length,
     errors,
   };

@@ -73,7 +73,7 @@ Use `study_filter` parameter to target a specific indicator by name substring (e
 - `draw_clear` → remove all
 
 ### "Manage alerts"
-- `alert_create` → set price alert (condition: "crossing", "greater_than", "less_than")
+- `alert_create` → set price alert (condition: "crossing", "greater_than", "less_than"; frequency: "on_first_fire" | "on_bar_close"; resolution: "1"/"15"/"240"/"1D"/"D"/"W"/"M")
 - `alert_list` → view active alerts
 - `alert_delete` → remove alerts (legacy bulk delete)
 - `alert_delete_by_id` → remove a single alert by `alert_id` (REST + DOM fallback)
@@ -88,7 +88,7 @@ Use `study_filter` parameter to target a specific indicator by name substring (e
 - `watchlist_get` → current symbols
 - `watchlist_add` → add a symbol
 - `watchlist_remove` → remove a symbol
-- `watchlist_export` → write current symbols to a JSON file
+- `watchlist_export` → write the watchlist to a JSON file, section headers and order preserved (schema 2)
 - `watchlist_import` → load symbols from a JSON file (mode: "merge" | "replace", supports `dry_run`)
 
 ### "Strategy parameter sweep"

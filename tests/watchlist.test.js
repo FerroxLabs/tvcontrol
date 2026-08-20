@@ -142,7 +142,10 @@ describe('exportTo()', () => {
     // File must exist and be valid JSON
     const { readFileSync } = await import('node:fs');
     const parsed = JSON.parse(readFileSync(filePath, 'utf8'));
-    assert.equal(parsed.schema_version, 1);
+    // schema_version 2: `entries` preserves section headers and order, so an
+    // export -> replace-import round-trip no longer destroys the structure.
+    assert.equal(parsed.schema_version, 2);
+    assert.ok(Array.isArray(parsed.entries), 'the faithful ordered list must be present');
     assert.ok(Array.isArray(parsed.symbols));
     assert.ok(parsed.exported_at);
   });
@@ -153,7 +156,7 @@ describe('exportTo()', () => {
       () => exportTo({ file_path: '/tmp/../etc/passwd', _deps }),
       (err) => {
         assert.ok(err instanceof ClassifiedError);
-        assert.equal(err.category, CATEGORIES.API_UNEXPECTED);
+        assert.equal(err.category, CATEGORIES.INVALID_ARGUMENT);
         return true;
       },
     );
@@ -165,7 +168,7 @@ describe('exportTo()', () => {
       () => exportTo({ file_path: '/etc/watchlist.json', _deps }),
       (err) => {
         assert.ok(err instanceof ClassifiedError);
-        assert.equal(err.category, CATEGORIES.API_UNEXPECTED);
+        assert.equal(err.category, CATEGORIES.INVALID_ARGUMENT);
         return true;
       },
     );
@@ -183,7 +186,7 @@ describe('importFrom()', () => {
       () => importFrom({ file_path: join(TMP, 'does-not-exist.json'), _deps }),
       (err) => {
         assert.ok(err instanceof ClassifiedError);
-        assert.equal(err.category, CATEGORIES.API_UNEXPECTED);
+        assert.equal(err.category, CATEGORIES.INVALID_ARGUMENT);
         return true;
       },
     );
@@ -197,7 +200,7 @@ describe('importFrom()', () => {
       () => importFrom({ file_path: bad, _deps }),
       (err) => {
         assert.ok(err instanceof ClassifiedError);
-        assert.equal(err.category, CATEGORIES.API_UNEXPECTED);
+        assert.equal(err.category, CATEGORIES.INVALID_ARGUMENT);
         return true;
       },
     );
@@ -211,7 +214,7 @@ describe('importFrom()', () => {
       () => importFrom({ file_path: bad, _deps }),
       (err) => {
         assert.ok(err instanceof ClassifiedError);
-        assert.equal(err.category, CATEGORIES.API_UNEXPECTED);
+        assert.equal(err.category, CATEGORIES.INVALID_ARGUMENT);
         return true;
       },
     );

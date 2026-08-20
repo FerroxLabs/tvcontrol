@@ -9,8 +9,12 @@ export function registerAlertTools(server) {
     message: z.string().optional().describe('Alert message'),
     mobile_push: z.coerce.boolean().optional().default(true).describe('Enable TradingView mobile push notification'),
     expiration_days: z.coerce.number().int().min(1).max(365).optional().default(30).describe('Days until expiration'),
-  }, async ({ condition, price, message, mobile_push, expiration_days }) => {
-    try { return jsonResult(await core.create({ condition, price, message, mobile_push, expiration_days })); }
+    frequency: z.enum(['on_first_fire', 'on_bar_close']).optional().default('on_first_fire')
+      .describe('on_first_fire fires once then deactivates. on_bar_close fires on every bar close where the condition holds, which is what you want for a level you keep watching. These are the only two values the API accepts (verified live).'),
+    resolution: z.string().optional().default('1')
+      .describe('Series the condition is evaluated on: minutes as a bare number (1, 5, 15, 60, 240) or D, W, M. Must match the timeframe you actually trade.'),
+  }, async ({ condition, price, message, mobile_push, expiration_days, frequency, resolution }) => {
+    try { return jsonResult(await core.create({ condition, price, message, mobile_push, expiration_days, frequency, resolution })); }
     catch (err) { return errorResult(err); }
   });
 

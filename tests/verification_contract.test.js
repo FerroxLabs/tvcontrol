@@ -19,7 +19,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { add, addBulk, remove, removeBulk, get } from '../src/core/watchlist.js';
-import { deleteById, deleteAlerts } from '../src/core/alerts.js';
+import { create, deleteById, deleteAlerts } from '../src/core/alerts.js';
 import { listScripts } from '../src/core/pine.js';
 import { CATEGORIES } from '../src/errors.js';
 import { scriptedDeps } from './_helpers.js';
@@ -277,6 +277,71 @@ describe('alert deletion verification contract', () => {
     await assert.rejects(
       () => deleteAlerts({ alert_ids: ['not-a-number'], _deps }),
       (err) => err.category === CATEGORIES.INVALID_ARGUMENT,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// alert creation: the frequency/resolution vocabulary, and the same verify rule
+// ---------------------------------------------------------------------------
+
+describe('alert_create frequency and resolution', () => {
+  function createDeps({ ok = true, id = 777, listed = true } = {}) {
+    const evaluateAsync = async (expr) => {
+      if (expr.includes('list_alerts')) {
+        return { alerts: listed ? [{ alert_id: id, symbol: 'X' }] : [] };
+      }
+      if (expr.includes('create_alert')) {
+        return ok
+          ? { ok: true, symbol: 'NASDAQ:AAPL', message: 'm', alert_id: id }
+          : { ok: false, status: 200, error: 'invalid_request' };
+      }
+      return undefined;
+    };
+    return { _deps: { evaluateAsync, evaluate: evaluateAsync } };
+  }
+
+  // VERIFIED LIVE 2026-08-20: of seventeen plausible frequency strings the API
+  // accepts exactly two. Guessing produced invalid_request every time, which is
+  // an unhelpful thing to hand a caller when the real problem is a typo.
+  for (const good of ['on_first_fire', 'on_bar_close']) {
+    it(`accepts the ${good} frequency the API actually supports`, async () => {
+      const { _deps } = createDeps();
+      const r = await create({ condition: 'crossing', price: 100, frequency: good, _deps });
+      assert.equal(r.success, true);
+      assert.equal(r.frequency, good);
+    });
+  }
+
+  for (const bad of ['once_per_bar', 'once_per_bar_close', 'once_per_minute', 'every_time']) {
+    it(`refuses ${bad} up front rather than letting the API answer invalid_request`, async () => {
+      const { _deps } = createDeps();
+      await assert.rejects(
+        () => create({ condition: 'crossing', price: 100, frequency: bad, _deps }),
+        (err) => err.category === CATEGORIES.INVALID_ARGUMENT,
+      );
+    });
+  }
+
+  it('accepts the resolution forms the API takes, and refuses the rest', async () => {
+    for (const good of ['1', '15', '240', '1D', 'D', 'W', '1M']) {
+      const { _deps } = createDeps();
+      const r = await create({ condition: 'crossing', price: 100, resolution: good, _deps });
+      assert.equal(r.resolution, good.toUpperCase(), `${good} should be accepted`);
+    }
+    const { _deps } = createDeps();
+    await assert.rejects(
+      () => create({ condition: 'crossing', price: 100, resolution: 'banana', _deps }),
+      (err) => err.category === CATEGORIES.INVALID_ARGUMENT,
+    );
+  });
+
+  it('THROWS when the API accepts the alert but it is not in the list afterwards', async () => {
+    // create() used to report success purely from its own POST response.
+    const { _deps } = createDeps({ listed: false });
+    await assert.rejects(
+      () => create({ condition: 'crossing', price: 100, _deps }),
+      (err) => err.category === CATEGORIES.API_UNEXPECTED && /does not appear/.test(err.message),
     );
   });
 });

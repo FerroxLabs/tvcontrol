@@ -17,7 +17,26 @@ const CONDITION_TYPES = {
   less_than: 'less', less: 'less', below: 'less', '<': 'less',
 };
 
-export async function create({ condition = 'crossing', price, message, mobile_push = true, expiration_days = 30, _deps } = {}) {
+// Both fields were hardcoded, so an agent could only ever create a one-shot
+// alert on the 1-minute series. For a 74-symbol watchlist that is the
+// difference between a usable alert set and a pile of alerts that fire once
+// and go quiet.
+//
+// THE VOCABULARY WAS DETERMINED EMPIRICALLY against the live API on
+// 2026-08-20, because guessing it produced invalid_request on every attempt.
+// Of on_first_fire, on_bar_close, once, every_time, once_per_bar,
+// once_per_bar_close, once_per_minute, on_every_tick, all_time, on_new_bar,
+// on_bar_open, on_tick, continuous, once_per_day, on_every_bar, only_once and
+// recurring, the API accepts exactly TWO. The operator's own 164 live alerts
+// all use on_bar_close, which is the value the TradingView UI writes.
+//   on_first_fire   fires once, then deactivates
+//   on_bar_close    fires each time a bar closes with the condition true
+const FREQUENCIES = new Set(['on_first_fire', 'on_bar_close']);
+// Resolutions, also verified live: bare minute counts (1, 5, 15, 30, 60, 120,
+// 240) and D, W, M, with or without a leading count (1D and D both work).
+const RESOLUTION_RE = /^(1|3|5|10|15|30|45|60|120|180|240|[1-9][0-9]{0,3}|[DWM]|[1-9][0-9]?[DWM])$/;
+
+export async function create({ condition = 'crossing', price, message, mobile_push = true, expiration_days = 30, frequency = 'on_first_fire', resolution = '1', _deps } = {}) {
   const { evaluateAsync } = _resolve(_deps);
   const numericPrice = requireFinite(price, 'price');
   const conditionType = CONDITION_TYPES[String(condition).trim().toLowerCase()];
@@ -27,6 +46,22 @@ export async function create({ condition = 'crossing', price, message, mobile_pu
   const expiryDays = Number(expiration_days);
   if (!Number.isInteger(expiryDays) || expiryDays < 1 || expiryDays > 365) {
     throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'expiration_days must be an integer from 1 to 365');
+  }
+  const freq = String(frequency).trim().toLowerCase();
+  if (!FREQUENCIES.has(freq)) {
+    throw new ClassifiedError(
+      CATEGORIES.INVALID_ARGUMENT,
+      `Unsupported alert frequency: ${frequency}`,
+      { hint: `One of: ${[...FREQUENCIES].join(', ')}.` },
+    );
+  }
+  const res = String(resolution).trim().toUpperCase();
+  if (!RESOLUTION_RE.test(res)) {
+    throw new ClassifiedError(
+      CATEGORIES.INVALID_ARGUMENT,
+      `Unsupported alert resolution: ${resolution}`,
+      { hint: 'Minutes as a bare number (1, 5, 15, 60, 240) or D, W, M.' },
+    );
   }
 
   const result = await evaluateAsync(`
@@ -45,12 +80,12 @@ export async function create({ condition = 'crossing', price, message, mobile_pu
         var payload = {
           conditions: [{
             type: conditionType,
-            frequency: 'on_first_fire',
+            frequency: ${safeString(freq)},
             series: [{ type: 'barset' }, { type: 'value', value: price }],
-            resolution: '1'
+            resolution: ${safeString(res)}
           }],
           symbol: '={"symbol":"' + symbol + '"}',
-          resolution: '1', message: message,
+          resolution: ${safeString(res)}, message: message,
           sound_file: 'alert/fired', sound_duration: 0,
           popup: true, auto_deactivate: true,
           email: false, sms_over_email: false,
@@ -73,19 +108,44 @@ export async function create({ condition = 'crossing', price, message, mobile_pu
     })()
   `);
   if (!result?.ok) {
-    throw new ClassifiedError(CATEGORIES.API_UNEXPECTED, `TradingView alert API rejected the request: ${result?.error || 'unknown error'}`);
+    throw new ClassifiedError(
+      CATEGORIES.API_UNEXPECTED,
+      `TradingView alert API rejected the request: ${result?.error || 'unknown error'}`,
+      { hint: result?.error === 'invalid_request' ? 'Check frequency and resolution: the API accepts only on_first_fire and on_bar_close, and resolutions like 15, 240, 1D.' : undefined },
+    );
   }
+
+  // The create response is the action reporting on itself. Confirm the alert
+  // exists from a separate read, the same rule the delete path follows.
+  let verified = null;
+  if (result.alert_id) {
+    const present = await _presentIds({ _deps });
+    if (present !== null) {
+      verified = present.has(String(result.alert_id));
+      if (!verified) {
+        throw new ClassifiedError(
+          CATEGORIES.API_UNEXPECTED,
+          `TradingView accepted the alert but ${result.alert_id} does not appear in the alert list`,
+          { hint: 'Call alert_list to see the true current state before retrying.' },
+        );
+      }
+    }
+  }
+
   return {
     success: true,
     source: 'pricealerts_api',
     symbol: result.symbol,
     alert_id: result.alert_id || null,
+    verified,
     condition: conditionType,
     condition_applied: true,
     price: numericPrice,
     message: result.message,
     mobile_push: mobile_push !== false,
     expiration_days: expiryDays,
+    frequency: freq,
+    resolution: res,
   };
 }
 

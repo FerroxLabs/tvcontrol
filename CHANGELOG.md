@@ -2,6 +2,116 @@
 
 All notable changes to TVControl are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [2.2.6] - 2026-08-20
+
+Two independent adversarial audits (Kimi K3, Codex 5.6) reviewed 2.2.5 with full
+repository access. Both returned the same verdict — do not ship — and converged,
+separately, on the same defect class: **an action that did not happen was
+reporting success.** That is the bug this project keeps rediscovering, and the
+2.2.5 fixes had reintroduced it one layer up from where it was fixed.
+
+Live testing against a real account then found three more that neither audit
+could see from the source.
+
+### Fixed — success now requires verification, everywhere
+
+- **`alert_delete_by_id` reported success while the alert was still there.** The
+  independent read set `verified: false` and `success: true` sat right beside
+  it. Every caller in this codebase branches on `success`.
+- **`alert_delete_by_id` treated a failed verification read as proof of
+  deletion.** `list()` returns `{success: false, alerts: []}` rather than
+  throwing, so `(after.alerts || []).some(...)` found nothing in an empty array
+  and concluded the alert was gone. An expired session was being recorded as
+  evidence.
+- **`alert_delete_by_id` "deleted" alerts that never existed.** Found live: id
+  `999999999999` returned `success: true, verified: true`. The endpoint accepts
+  any id, and "it is not in the list afterwards" is trivially true of something
+  that was never in the list. Presence is now established first.
+- **`alert_delete` (the bulk path, and the one the CLI uses) had no verification
+  at all.** `deleted_count` was `ids.length` — the number requested, presented
+  as the number that happened. A partial success in a batch of 50 reported all
+  50 deleted.
+- **`alert_create` trusted its own POST response.** It now confirms the alert
+  exists from a separate read.
+- **`watchlist_import` counted failed adds as added.** `add()` returned
+  `{success: false}` instead of throwing, and the import loop only treated a
+  throw as failure. A symbol that never arrived was reported in `added` with
+  top-level `success: true`. `add()` and `remove()` now throw when their own
+  verification fails.
+- **`watchlist_remove_bulk` called symbols it never touched "removed".** The
+  rule was `!was_present || removed`, which defines absence as success.
+  Removing `AAPL` from a list holding `NASDAQ:AAPL` posted nothing and reported
+  success. `not_found` and `survived` are now reported separately, and neither
+  counts as a removal.
+- **A whitespace-only symbol reported success.** `["   "]` filtered to `[]`, and
+  `[].every(...)` is `true`.
+- **`watchlist_get` turned a 200-with-error-body into an empty watchlist.**
+  `{"s":"error"}` has no `id` and no `symbols` array; the shape is now checked.
+- **Mutations could be verified against a different watchlist.** If the active
+  list changed mid-flight, list B could confirm a mutation to list A.
+- **`pine_list_scripts` reported an empty library when the fetch failed.** It
+  returned `success: true, total: 0` with the error in a field nobody reads.
+  That tells someone with 276 scripts that they have none.
+- **`batch_run` with `get_study_values` could report an all-green scan that read
+  nothing.** `getStudyValues` returned `success: true, count: 0` whether the
+  chart had no indicators or the extraction had broken. It now distinguishes
+  the two, and reports how many studies it actually saw.
+
+### Fixed — found by live testing, not by either audit
+
+- **A bare ticker was stored verbatim.** `POST /append/` with `["KO"]` stores
+  the literal string `"KO"`; it does not resolve to `NYSE:KO`. The old DOM path
+  went through TradingView's own autocomplete and always wrote the qualified
+  form. The REST rewrite lost that, and verification made it *worse*, because
+  the read-back finds the exact string that was posted — so a row TradingView
+  may never resolve verified as a success. Bare tickers now resolve through
+  symbol search before being posted, and one that resolves to nothing is
+  refused.
+- **`quotes_available` was true while no returned symbol had a price.** The
+  panel was rendering a different watchlist entirely: 59 DOM symbols, 29 API
+  symbols, zero overlap. It now reports what actually matched and says plainly
+  when the visible list is not the active one.
+- **`watchlist_export` destroyed section structure.** Schema 2 adds `entries` —
+  the stored list verbatim, headers in place and in order. Verified on a live
+  39-entry watchlist with 10 sections: exported, order preserved, restorable.
+
+### Added
+
+- **`alert_create` takes `frequency` and `resolution`.** Both were hardcoded, so
+  an agent could only ever create a one-shot alert on the 1-minute series. The
+  vocabulary had to be determined empirically against the live API: of seventeen
+  plausible frequency names, it accepts exactly **two** — `on_first_fire` and
+  `on_bar_close`. Everything else returns a bare `invalid_request`. Bad values
+  are now refused up front with a message that names the valid ones.
+- **`tv pine list` gained `--filter`, `--limit` and `--offset`.** Paging landed
+  in 2.2.5 without CLI flags, so scripts past the first 50 were unreachable and
+  `next_offset` was advice the CLI could not take.
+
+### Changed
+
+- Caller mistakes in `watchlist_export` / `watchlist_import` (bad path, missing
+  file, malformed JSON) are now `invalid_argument` rather than `api_unexpected`,
+  which had been sending people to look at TradingView for their own typo.
+- Duplicate symbols in bulk calls are collapsed, so `added_count` counts rows
+  rather than requests.
+- Dead code the 2.2.5 rewrite orphaned has been removed.
+
+### Tests
+
+Both audits made the same criticism of the 2.2.5 tests, and it was correct: they
+assert that strings appear in the source, and every one of them passed while the
+defects above were live. Two of them actively *permitted* the bug by asserting
+`verified: false` alongside `success: true`.
+
+`tests/verification_contract.test.js` is behavioural and exercises the failure
+paths. 13 of its cases fail against the pre-fix source; the ones that pass are
+happy-path cases that were already correct. The source-text tests are kept, but
+as what they are: anti-reversion tripwires, not evidence of correctness.
+
+571 offline tests. Verified live: watchlist 29 → 30 → 29, bare `KO` resolved to
+`NYSE:KO` and removed, garbage ticker refused, alerts 164 → 165 → 164, phantom
+delete refused, export round-trip preserving all 39 entries and 10 sections.
+
 ## [2.2.5] - 2026-08-20
 
 ### Fixed
