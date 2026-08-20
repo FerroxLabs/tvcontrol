@@ -65,17 +65,19 @@ describe('watchlist verification contract', () => {
 
   it('removeBulk() does NOT call a symbol that was never present "removed"', async () => {
     // Old rule was `!was_present || removed`, which defines "it was not there"
-    // as a successful removal. Asking to remove AAPL from a list holding
-    // NASDAQ:AAPL performed no POST at all and returned success:true.
+    // as a successful removal, so a request that performed no POST at all still
+    // returned success:true. NYSE:GE is genuinely absent here — not a bare
+    // ticker that resolves to something stored, which is a separate case
+    // covered below.
     const { _deps } = scriptedDeps({}, [
       LIST(['NASDAQ:AAPL']),
       LIST(['NASDAQ:AAPL']),
     ]);
-    const r = await removeBulk({ symbols: ['AAPL'], _deps });
+    const r = await removeBulk({ symbols: ['NYSE:GE'], _deps });
     assert.equal(r.success, false, 'nothing was removed, so this is not a success');
     assert.equal(r.verified, false);
     assert.equal(r.removed_count, 0);
-    assert.deepEqual(r.not_found, ['AAPL']);
+    assert.deepEqual(r.not_found, ['NYSE:GE']);
   });
 
   it('removeBulk() separates "never there" from "would not go"', async () => {
@@ -145,6 +147,32 @@ describe('watchlist verification contract', () => {
     await assert.rejects(
       () => addBulk({ symbols: ['ZZQQXNOTREAL'], _deps }),
       (err) => err.category === CATEGORIES.SYMBOL_UNKNOWN,
+    );
+  });
+
+  it('remove accepts a bare ticker for a symbol that add stored exchange-prefixed', async () => {
+    // ASYMMETRY BUG: add("KO") resolves and stores NYSE:KO. Without the same
+    // courtesy on the way out, remove("KO") failed SYMBOL_UNKNOWN and you could
+    // add something you could not remove with the same argument. The match here
+    // is local, against the list just read — no symbol-search call.
+    const { _deps, evaluate } = scriptedDeps({}, [
+      LIST(['NYSE:KO', 'NASDAQ:MSFT']),
+      POSTED,
+      LIST(['NASDAQ:MSFT']),
+    ]);
+    const r = await removeBulk({ symbols: ['KO'], _deps });
+    assert.equal(r.success, true);
+    assert.equal(r.removed_count, 1);
+    const posted = evaluate.calls.find((c) => c.includes('remove'));
+    assert.ok(posted.includes('NYSE:KO'), 'the stored form must be what gets removed');
+  });
+
+  it('an ambiguous bare ticker is refused rather than guessed', async () => {
+    // Choosing one of two exchanges and deleting it is not recoverable.
+    const { _deps } = scriptedDeps({}, [LIST(['NYSE:KO', 'LSE:KO'])]);
+    await assert.rejects(
+      () => removeBulk({ symbols: ['KO'], _deps }),
+      (err) => err.category === CATEGORIES.INVALID_ARGUMENT && /more than one/.test(err.message),
     );
   });
 

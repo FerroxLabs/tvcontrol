@@ -399,9 +399,33 @@ export async function remove({ symbol, _deps }) {
 
 export async function removeBulk({ symbols, _deps }) {
   const { evaluateAsync } = _resolve(_deps);
-  const wanted = _cleanSymbols(symbols);
+  const requested = _cleanSymbols(symbols);
   const before = await _apiActive(evaluateAsync);
   const had = new Set(before.symbols.map(String));
+
+  // ASYMMETRY BUG: add() resolves a bare ticker, so add("KO") stores NYSE:KO.
+  // Without the same courtesy here, remove("KO") would then fail SYMBOL_UNKNOWN
+  // and you could add something you could not remove with the same argument.
+  //
+  // This match is LOCAL, against the list we just read, not a symbol-search
+  // call: the question is "which stored entry did you mean", and the stored
+  // entries are right here. A bare ticker matches an entry whose ticker part is
+  // identical. An ambiguous match is refused rather than guessed, because
+  // picking one of two exchanges and deleting it is not a recoverable mistake.
+  const wanted = requested.map((x) => {
+    if (had.has(x) || x.includes(':')) return x;
+    const up = x.toUpperCase();
+    const hits = [...had].filter((stored) => stored.toUpperCase().split(':').pop() === up);
+    if (hits.length === 1) return hits[0];
+    if (hits.length > 1) {
+      throw new ClassifiedError(
+        CATEGORIES.INVALID_ARGUMENT,
+        `"${x}" matches more than one stored symbol: ${hits.join(', ')}`,
+        { hint: 'Pass the exchange-prefixed form so the right one is removed.' },
+      );
+    }
+    return x;
+  });
   const present = wanted.filter((x) => had.has(x));
 
   if (present.length) await _apiMutate(evaluateAsync, before.id, 'remove', present);
