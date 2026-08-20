@@ -174,38 +174,57 @@ export async function deleteById({ alert_id, _deps } = {}) {
   }
 
   const { evaluateAsync } = _resolve(_deps);
-  const safeId = safeString(alert_id);
 
-  // Try POST variant first, then GET variant
+  // POST /delete_alert (SINGULAR) DOES NOT EXIST. TradingView answers it with
+  // HTTP 200 and {"s":"error", code:"no_such_endpoint"}, so the old code saw a
+  // 200, fell through to a DOM path that cannot delete a single alert, and
+  // reported failure for something the API does fine.
+  //
+  // Measured against the live API on 2026-08-20:
+  //   POST /delete_alert?alert_id=N                  no such endpoint
+  //   POST /remove_alert?alert_id=N                  no such endpoint
+  //   POST /modify_alert?alert_id=N                  no such endpoint
+  //   POST /delete_alerts {payload:{alert_ids:[N]}}  {"s":"ok"}
+  //
+  // The plural endpoint exists and accepts a single id. Deleting one alert is
+  // deleting a list of length one.
+  // The id must go over the wire as a NUMBER. Sending it as a string returns
+  // {"s":"error"} with no useful message — verified against the live API.
+  const id = String(alert_id).trim();
+  const numericId = Number(id);
+  if (!Number.isFinite(numericId)) {
+    throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, `alert_id must be numeric, got: ${id}`);
+  }
   const result = await evaluateAsync(`
-    (function() {
-      var url = 'https://pricealerts.tradingview.com/delete_alert?alert_id=' + encodeURIComponent(${safeId});
-      var headers = { 'Origin': 'https://www.tradingview.com', 'Referer': 'https://www.tradingview.com/' };
-      return fetch(url, { method: 'POST', credentials: 'include', headers: headers })
-        .then(function(r) { return r.json(); })
-        .then(function(data) {
-          if (data.s === 'ok') return { s: 'ok', method: 'post' };
-          return fetch(url, { method: 'GET', credentials: 'include', headers: headers })
-            .then(function(r2) { return r2.json(); })
-            .then(function(data2) {
-              if (data2.s === 'ok') return { s: 'ok', method: 'get' };
-              return { s: 'error', errmsg: data2.errmsg || data.errmsg || 'API returned non-ok' };
-            });
-        })
-        .catch(function(e) { return { s: 'error', errmsg: e.message }; });
+    (async function() {
+      try {
+        var response = await fetch('https://pricealerts.tradingview.com/delete_alerts', {
+          method: 'POST', credentials: 'include',
+          headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
+          body: JSON.stringify({ payload: { alert_ids: [${numericId}] } })
+        });
+        var text = await response.text();
+        var data = {}; try { data = JSON.parse(text); } catch (e) {}
+        return { ok: response.ok && data.s === 'ok', status: response.status, error: data.errmsg || text.slice(0, 200) };
+      } catch (e) { return { ok: false, error: e.message }; }
     })()
   `);
 
-  if (result?.s === 'ok') {
-    return { success: true, alert_id, method: 'rest_api', variant: result.method };
+  if (!result?.ok) {
+    throw new ClassifiedError(
+      CATEGORIES.API_UNEXPECTED,
+      `Alert deletion failed: ${result?.error || 'unknown error'}`,
+      { hint: 'Confirm the alert_id from alert_list and that you are still logged in.' },
+    );
   }
 
-  // REST failed — DOM fallback cannot delete individual alerts
-  return {
-    success: false,
-    method: 'dom_fallback_unsupported',
-    category: CATEGORIES.API_UNEXPECTED,
-    error: 'Individual alert deletion via DOM not supported; use delete_all:true or ensure REST endpoint is reachable',
-    hint: 'Ensure you are logged in and the pricealerts REST endpoint is reachable, or use alert_delete with delete_all:true.',
-  };
+  // VERIFY from a separate read. The API's own "ok" is the action reporting on
+  // itself, which is the failure mode this codebase keeps finding.
+  let verified = null;
+  try {
+    const after = await list({ _deps });
+    verified = !(after.alerts || []).some((a) => String(a.alert_id) === id);
+  } catch { verified = null; }
+
+  return { success: true, source: 'pricealerts_api', alert_id: id, verified };
 }
