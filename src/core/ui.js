@@ -93,23 +93,30 @@ export async function openPanel({ panel, action }) {
           // the dialog button, and let the caller verify.
           var acted = false;
           if (panel === 'pine-editor') {
-            // bottomWidgetBar EXISTS in Desktop 3.3.0 and its methods do not
-            // throw, they simply do not open anything. So "the method was
-            // callable" is not evidence it worked: measure, then fall back to
-            // the dialog. Guarding the fallback on acted was the same mistake
-            // in miniature as the bug this whole file is fixing.
-            if (bwb && typeof bwb.activateScriptEditorTab === 'function') { bwb.activateScriptEditorTab(); acted = true; }
-            else if (bwb && typeof bwb.showWidget === 'function') { bwb.showWidget(widgetName); acted = true; }
-            var nowVisible = false;
-            var oNodes = document.querySelectorAll('.monaco-editor.pine-editor-monaco');
-            for (var oi = 0; oi < oNodes.length; oi++) {
-              var ob = oNodes[oi].getBoundingClientRect();
-              if (ob.width > 0 && ob.height > 0) { nowVisible = true; break; }
-            }
-            if (!nowVisible) {
-              var dlgBtn = document.querySelector('[data-name="pine-dialog-button"]')
-                || document.querySelector('[aria-label="Pine"]');
-              if (dlgBtn) { dlgBtn.click(); acted = true; }
+            // ORDER MATTERS, AND IT IS THE WHOLE BUG. The previous version
+            // called bottomWidgetBar FIRST and clicked the dialog button only
+            // as a fallback. Measured on Desktop 3.3.0: with the widget-bar
+            // call in front, the dialog never appeared within 3s and open
+            // failed every time; clicking the dialog button on its own opened
+            // it immediately and repeatably. bottomWidgetBar exists here and
+            // its methods do not throw, they just leave the editor shut and
+            // apparently leave TradingView believing it is already open, so
+            // the later click is ignored.
+            //
+            // So on any build that HAS the dialog button, that button is the
+            // only thing used. bottomWidgetBar is kept solely for older builds
+            // that predate the dialog.
+            var dlgBtn = document.querySelector('[data-name="pine-dialog-button"]')
+              || document.querySelector('[aria-label="Pine"]');
+            if (dlgBtn) {
+              // The button OPENS and does not toggle: verified by clicking it
+              // twice against a live chart, which left the editor open both
+              // times. Safe to click without first checking whether it is open.
+              dlgBtn.click(); acted = true;
+            } else if (bwb && typeof bwb.activateScriptEditorTab === 'function') {
+              bwb.activateScriptEditorTab(); acted = true;
+            } else if (bwb && typeof bwb.showWidget === 'function') {
+              bwb.showWidget(widgetName); acted = true;
             }
           } else if (bwb && typeof bwb.showWidget === 'function') {
             bwb.showWidget(widgetName); acted = true;
