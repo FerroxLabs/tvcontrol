@@ -2,6 +2,32 @@
 
 All notable changes to TVControl are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [2.2.3] - 2026-08-20
+
+### Fixed
+
+- The Pine editor is reachable again. `document.querySelector('.monaco-editor.pine-editor-monaco')` returned a collapsed 0x0 node that TradingView keeps in the DOM permanently and that carries no React fiber, so every caller concluded the editor was closed while it was plainly open on screen. The finder now measures each candidate's bounding box and takes the first one with real dimensions.
+- Edits reach the chart instead of vanishing. The push path wrote into `getEditors()[0]`, which is detached from any DOM node. Four consecutive rounds of edits compiled clean, reported "Saved", never bumped the script version and never appeared on the chart. The editor is now selected by matching its DOM node against the visible container.
+- `pine_save` no longer reports success it did not verify. It returns `saved: true | false | null`, where `null` means unknown. Previously an unverifiable save was indistinguishable from a confirmed one.
+- `ui_open_panel('pine-editor', 'open')` works on macOS. It called `bottomWidgetBar.activateScriptEditorTab()` first and clicked `[data-name="pine-dialog-button"]` only as a fallback. On macOS the widget-bar call leaves the editor shut and leaves TradingView believing it is already open, so the click that follows is ignored. The dialog button is now tried first on any build that has it, with the widget bar kept for older builds. Measured against live charts: macOS + Desktop 3.3.0 failed every time before the change and passes 9 of 9 open/close transitions after; Windows + Desktop 3.3.0 and Windows + Chrome passed both before and after, which is why this went unnoticed.
+- `ui_open_panel` verifies the panel actually changed state before returning success, and raises a classified `tv_ui_changed` error naming the dialog when it does not. It previously returned success unconditionally, which sent callers hunting for imaginary bugs downstream.
+- `npm test` completes. `--test-force-exit` was gated on Node >= 25, but the flag has existed since Node 22.0.0. Without it `tests/state.test.js` passes all 30 of its tests and then holds the event loop open, and because Node's TAP reporter buffers to the end, the hang produced no output at all rather than a visible failure. The gate is now 22. The leaked handle itself is still open and worth finding.
+- `js-yaml` bumped to 4.3.1 for CVE-2026-59870. It arrives through `eslint`, a devDependency, so it was never in what customers install; the failing `npm audit` step was blocking CI on every platform.
+
+### Removed
+
+- `skills/market-open-report`. It was built for Wayland Desktop's Smart Trader Assistant and only lived in this repo because that is where the MCP tools it drives were being written. It should never have shipped here. Four of its files are in 2.2.2 and cannot be withdrawn, npm's unpublish window having closed; they are gone from 2.2.3 onward. No strategy research, backtest data or audit was ever in a published package.
+
+### Added
+
+- `tests/pine_editor_finder.test.js` reproduces the exact production DOM — two `.monaco-editor.pine-editor-monaco` nodes with the first collapsed to 0x0, and three editors with index 0 detached — and is confirmed to fail against the pre-fix finder.
+- `tests/ui_open_panel_order.test.js` pins the open-path ordering. It exists because the bug is macOS-specific: on Windows the old order looks correct, so nothing on that platform would object to reverting the fix.
+- `.githooks/pre-push` refuses to push private research to this public remote. It scans every commit in the range rather than the net diff, because a push uploads all of them and a file added in one commit and deleted in a later one stays browsable on GitHub.
+
+### Note on 2.2.2
+
+2.2.2 was published on 2026-08-05 from a working tree that was never committed. `main` still read 2.2.1, no `v2.2.2` tag was cut, and no changelog entry was written. That is also how four `skills/market-open-report` files reached npm. Releases are cut from `main` from this version onward.
+
 ## [2.2.1] - 2026-08-04
 
 ### Fixed
