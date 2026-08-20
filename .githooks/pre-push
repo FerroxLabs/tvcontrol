@@ -7,30 +7,57 @@
 # crypto findings and the copy briefs. origin/main had none of it. The only
 # thing that stopped it was checking the file list first, which is not a control.
 #
+# The research now lives in ~/dev/tradingresearch. This hook is the seatbelt.
+#
+# IT SCANS HISTORY, NOT THE NET DIFF, AND THAT DISTINCTION IS THE WHOLE POINT.
+# A push uploads every commit in the range, so a file that was added in one
+# commit and deleted in a later one is still fully browsable on GitHub. A net
+# diff shows it as absent. That is how this guard would have passed a push
+# that published everything.
+#
 # Bypass deliberately with: git push --no-verify
 PATTERN='^skills/market-open-report/|\.pine$|FINDINGS\.md$|^AUDIT|COPY-BRIEF|HANDOFF-.*\.md$'
+ZERO=0000000000000000000000000000000000000000
 
-remote_sha_range() {
+# Every path touched by any commit being pushed, across the whole range.
+paths_in_push() {
   while read -r _local_ref local_sha _remote_ref remote_sha; do
-    [ "$local_sha" = "0000000000000000000000000000000000000000" ] && continue
-    if [ "$remote_sha" = "0000000000000000000000000000000000000000" ]; then
-      git diff --name-only "$(git merge-base origin/main "$local_sha" 2>/dev/null || echo origin/main)" "$local_sha"
+    [ "$local_sha" = "$ZERO" ] && continue          # branch deletion, nothing uploads
+    if [ "$remote_sha" = "$ZERO" ]; then
+      # New branch. Everything not already on the remote is being uploaded.
+      base=$(git merge-base origin/main "$local_sha" 2>/dev/null)
+      if [ -n "$base" ]; then
+        git log --name-only --pretty=format: "$base..$local_sha"
+      else
+        # No shared history to subtract. Scan the entire branch.
+        git log --name-only --pretty=format: "$local_sha"
+      fi
     else
-      git diff --name-only "$remote_sha" "$local_sha"
+      git log --name-only --pretty=format: "$remote_sha..$local_sha"
     fi
   done
 }
 
-OFFENDING=$(remote_sha_range | grep -E "$PATTERN" | head -20)
-if [ -n "$OFFENDING" ]; then
-  COUNT=$(remote_sha_range | grep -cE "$PATTERN")
+# Read stdin ONCE. The previous version called its range function twice and the
+# second call found stdin already consumed, so it always reported "0 files".
+ALL=$(paths_in_push | grep -E "$PATTERN" | sort -u)
+
+if [ -n "$ALL" ]; then
+  COUNT=$(printf '%s\n' "$ALL" | wc -l | tr -d ' ')
+  SHOWN=20
   echo "" >&2
-  echo "PUSH BLOCKED: $COUNT private research file(s) in this push." >&2
+  echo "PUSH BLOCKED: $COUNT private file(s) reachable from this push." >&2
   echo "github.com/FerroxLabs/tvcontrol is PUBLIC." >&2
   echo "" >&2
-  echo "$OFFENDING" | sed 's/^/  /' >&2
+  printf '%s\n' "$ALL" | head -"$SHOWN" | sed 's/^/  /' >&2
+  if [ "$COUNT" -gt "$SHOWN" ]; then
+    echo "  ... and $((COUNT - SHOWN)) more not listed." >&2
+  fi
   echo "" >&2
-  echo "Trading research belongs in a private repo, not here." >&2
+  echo "These are reachable from the commits being pushed even if a later" >&2
+  echo "commit deleted them. Research belongs in ~/dev/tradingresearch." >&2
+  echo "Land tvcontrol work on a branch built from origin/main instead." >&2
+  echo "" >&2
   echo "If this is genuinely intended: git push --no-verify" >&2
   echo "" >&2
   exit 1
