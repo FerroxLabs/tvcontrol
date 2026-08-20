@@ -880,12 +880,16 @@ export async function openScript({ name }) {
   return { success: true, name: result.name, script_id: result.id, lines: result.lines, source: 'internal_api', opened: true };
 }
 
-export async function listScripts({ name_filter, limit = 50, offset = 0 } = {}) {
+export async function listScripts({ name_filter, limit = 50, offset = 0, _deps } = {}) {
+  // Injectable so the failure path can be tested offline. Without this seam
+  // the "unreadable library is not an empty library" case could only be
+  // asserted by grepping the source, which is what both audits objected to.
+  const evaluateAsyncImpl = _deps?.evaluateAsync || evaluateAsync;
   // MEASURED: this returned 53,933 bytes on a real account, roughly 13,500
   // tokens, on EVERY call. A tool that blows the context budget is worse than a
   // missing one, because the agent tries anyway and pays for it. Filtering and
   // pagination are the whole fix; the underlying fetch is fine.
-  const scripts = await evaluateAsync(`
+  const scripts = await evaluateAsyncImpl(`
     fetch('https://pine-facade.tradingview.com/pine-facade/list/?filter=saved', { credentials: 'include' })
       .then(function(r) { return r.json(); })
       .then(function(data) {
@@ -905,7 +909,19 @@ export async function listScripts({ name_filter, limit = 50, offset = 0 } = {}) 
       .catch(function(e) { return {scripts: [], error: e.message}; })
   `);
 
-  const all = scripts?.scripts || [];
+  // A failed fetch used to come back as success:true with total:0 and the
+  // error tucked into a field nobody reads — indistinguishable from "your
+  // script library is empty", which is a terrifying thing to tell someone who
+  // has 276 scripts. An expired session is an error, not an empty library.
+  if (!scripts || !Array.isArray(scripts.scripts) || scripts.error) {
+    throw new ClassifiedError(
+      CATEGORIES.API_UNEXPECTED,
+      `Could not list Pine scripts: ${scripts?.error || 'the pine-facade response was not a script list'}`,
+      { hint: 'Usually an expired session. Reload TradingView, confirm you are logged in, and retry.' },
+    );
+  }
+
+  const all = scripts.scripts;
   const needle = typeof name_filter === 'string' ? name_filter.trim().toLowerCase() : '';
   const matched = needle
     ? all.filter((x) => `${x.name || ''} ${x.title || ''}`.toLowerCase().includes(needle))
@@ -929,7 +945,11 @@ export async function listScripts({ name_filter, limit = 50, offset = 0 } = {}) 
     ...(start + page.length < matched.length
       ? { next_offset: start + page.length, hint: `${matched.length - (start + page.length)} more. Re-call with offset=${start + page.length}, or pass name_filter to narrow.` }
       : {}),
-    ...(scripts?.error ? { error: scripts.error } : {}),
+    // Paging past the end is a caller mistake, not an empty library. Say so,
+    // otherwise the agent concludes the scripts ran out.
+    ...(start > 0 && start >= matched.length
+      ? { out_of_range: true, hint: `offset ${start} is past the end; ${matched.length} script(s) match. Re-call with a smaller offset.` }
+      : {}),
     source: 'internal_api',
   };
 }

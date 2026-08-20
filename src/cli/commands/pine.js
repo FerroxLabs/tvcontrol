@@ -95,7 +95,18 @@ register('pine', {
     }],
     ['list', {
       description: 'List saved Pine Scripts',
-      handler: () => core.listScripts(),
+      // listScripts pages at 50 now. Without these flags the CLI could not
+      // reach script 51, and next_offset was advice it had no way to take.
+      options: {
+        filter: { type: 'string', description: 'Only scripts whose name or title contains this text' },
+        limit: { type: 'string', description: 'Maximum scripts to return (1-200; default 50)' },
+        offset: { type: 'string', description: 'Pagination offset' },
+      },
+      handler: (opts) => core.listScripts({
+        name_filter: opts.filter,
+        ...(opts.limit != null ? { limit: Number(opts.limit) } : {}),
+        ...(opts.offset != null ? { offset: Number(opts.offset) } : {}),
+      }),
     }],
     ['errors', {
       description: 'Get Pine Script compilation errors',

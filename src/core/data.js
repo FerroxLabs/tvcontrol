@@ -746,6 +746,9 @@ export async function getStudyValues({ _deps } = {}) {
       var model = chart.model();
       var sources = model.model().dataSources();
       var results = [];
+      var emptyStudies = [];
+      var failedStudies = [];
+      var seen = 0;
       for (var si = 0; si < sources.length; si++) {
         var s = sources[si];
         if (!s.metaInfo) continue;
@@ -753,6 +756,7 @@ export async function getStudyValues({ _deps } = {}) {
           var meta = s.metaInfo();
           var name = meta.description || meta.shortDescription || '';
           if (!name) continue;
+          seen++;
           var values = {};
           var entityId = null;
           var inputs = [];
@@ -781,12 +785,40 @@ export async function getStudyValues({ _deps } = {}) {
             }
           } catch(e) {}
           if (Object.keys(values).length > 0) results.push({ entity_id: entityId, name: name, inputs: inputs, values: values });
-        } catch(e) {}
+          else emptyStudies.push(name);
+        } catch(e) { failedStudies.push(String(e && e.message || e).slice(0, 120)); }
       }
-      return results;
+      return { seen: seen, results: results, empty: emptyStudies, failed: failedStudies };
     })()
   `);
-  return { success: true, count: data?.length || 0, studies: data || [] };
+
+  // A chart with three indicators on it that yields zero values is a BROKEN
+  // READ, not an empty chart, and batch_run stamped success:true on it either
+  // way — an all-green universe scan that read nothing. Tell the two apart.
+  if (!data || !Array.isArray(data.results)) {
+    throw new ClassifiedError(
+      CATEGORIES.TV_UI_CHANGED,
+      'Could not read indicator values from the chart',
+      { hint: 'TradingView may have changed its internals. Run tv_health_check, and confirm the chart has finished loading.' },
+    );
+  }
+  if (data.results.length === 0 && data.seen > 0) {
+    throw new ClassifiedError(
+      CATEGORIES.TV_UI_CHANGED,
+      `${data.seen} indicator(s) are on the chart but none produced values`,
+      {
+        hint: 'Usually the chart is still loading — retry in a second. If it persists, dataWindowView() has changed shape and this needs a fix.',
+        details: { empty: data.empty, failed: data.failed },
+      },
+    );
+  }
+  return {
+    success: true,
+    count: data.results.length,
+    studies: data.results,
+    studies_on_chart: data.seen,
+    ...(data.empty && data.empty.length ? { no_values: data.empty } : {}),
+  };
 }
 
 export async function getPineLines({ study_filter, verbose } = {}) {

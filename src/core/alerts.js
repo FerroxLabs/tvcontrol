@@ -145,6 +145,41 @@ export async function deleteAlerts({ delete_all, alert_ids, alert_id, _deps } = 
   if (ids.length === 0) {
     throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, delete_all ? 'No active alerts to delete' : 'Provide alert_id, alert_ids, or delete_all:true');
   }
+  // The endpoint wants NUMBERS. A string id returns a bare {"s":"error"} with
+  // no errmsg, which is a miserable thing to debug. Reject bad ids up front,
+  // and normalise once so the request and the verification agree on spelling
+  // ("00123" and 123 are the same alert).
+  const numericIds = ids.map((value) => {
+    const n = Number(String(value).trim());
+    if (!Number.isInteger(n) || !Number.isSafeInteger(n) || n <= 0) {
+      throw new ClassifiedError(
+        CATEGORIES.INVALID_ARGUMENT,
+        `alert_id must be a positive integer, got: ${value}`,
+        { hint: 'Call alert_list and use the alert_id field verbatim.' },
+      );
+    }
+    return n;
+  });
+  ids = numericIds;
+
+  // Same rule as deleteById: an id that was never there cannot be deleted, and
+  // reporting it as deleted is how a caller concludes their alert is gone.
+  const presentBefore = await _presentIds({ _deps });
+  if (presentBefore === null) {
+    throw new ClassifiedError(
+      CATEGORIES.API_UNEXPECTED,
+      'Could not read the alert list, so the deletion cannot be verified and was not attempted',
+      { hint: 'Usually an expired session. Reload TradingView, confirm you are logged in, and retry.' },
+    );
+  }
+  const absent = ids.filter((n) => !presentBefore.has(String(n)));
+  if (absent.length === ids.length) {
+    throw new ClassifiedError(
+      CATEGORIES.INVALID_ARGUMENT,
+      `None of the requested alert ids exist: ${absent.join(', ')}`,
+      { hint: 'Call alert_list and use alert_id values from that response verbatim.' },
+    );
+  }
 
   const result = await evaluateAsync(`
     (async function() {
@@ -161,7 +196,67 @@ export async function deleteAlerts({ delete_all, alert_ids, alert_id, _deps } = 
     })()
   `);
   if (!result?.ok) throw new ClassifiedError(CATEGORIES.API_UNEXPECTED, `TradingView alert deletion failed: ${result?.error || 'unknown error'}`);
-  return { success: true, source: 'pricealerts_api', deleted_count: ids.length, alert_ids: ids };
+
+  // deleted_count used to be ids.length — the number we ASKED for, dressed up
+  // as the number that happened. A partial success in a batch of 50 reported
+  // all 50 gone. Count what a fresh read can no longer find.
+  const survivors = await _survivingIds(ids, { _deps });
+  if (survivors === null) {
+    throw new ClassifiedError(
+      CATEGORIES.API_UNEXPECTED,
+      'The delete call was accepted but the alert list could not be re-read, so the deletion is unconfirmed',
+      { hint: 'Call alert_list to see the true current state before retrying.' },
+    );
+  }
+  const stillThere = ids.filter((id) => survivors.has(String(id)));
+  const problems = [];
+  if (stillThere.length) problems.push(`${stillThere.length} still exist after the delete was accepted`);
+  if (absent.length) problems.push(`${absent.length} did not exist to begin with`);
+  return {
+    success: stillThere.length === 0 && absent.length === 0,
+    source: 'pricealerts_api',
+    requested_count: ids.length,
+    // Only ids that WERE there and are now gone. An id that never existed is
+    // not a deletion, however convenient it would be to count it as one.
+    deleted_count: ids.length - stillThere.length - absent.length,
+    alert_ids: ids,
+    ...(stillThere.length ? { survived: stillThere } : {}),
+    ...(absent.length ? { not_found: absent } : {}),
+    ...(problems.length ? { error: `of ${ids.length} requested: ${problems.join('; ')}` } : {}),
+    verified: stillThere.length === 0 && absent.length === 0,
+  };
+}
+
+/**
+ * Which of these ids does a FRESH read still find? Returns a Set of id strings,
+ * or null when the list itself could not be read.
+ *
+ * Reading the list is not optional bookkeeping, it is the evidence. list()
+ * returns {success:false, alerts:[]} rather than throwing when the session has
+ * expired, so "the array does not contain it" was previously indistinguishable
+ * from "I could not look" — and an expired session read as proof of deletion.
+ */
+async function _presentIds({ _deps } = {}) {
+  let snap;
+  try {
+    snap = await list({ _deps });
+  } catch {
+    return null;
+  }
+  if (!snap || snap.success !== true || !Array.isArray(snap.alerts)) return null;
+  return new Set(snap.alerts.map((a) => String(a.alert_id)));
+}
+
+async function _survivingIds(ids, { _deps } = {}) {
+  let after;
+  try {
+    after = await list({ _deps });
+  } catch {
+    return null;
+  }
+  if (!after || after.success !== true || !Array.isArray(after.alerts)) return null;
+  const present = new Set(after.alerts.map((a) => String(a.alert_id)));
+  return new Set(ids.map((id) => String(id)).filter((id) => present.has(id)));
 }
 
 export async function deleteById({ alert_id, _deps } = {}) {
@@ -190,11 +285,45 @@ export async function deleteById({ alert_id, _deps } = {}) {
   // deleting a list of length one.
   // The id must go over the wire as a NUMBER. Sending it as a string returns
   // {"s":"error"} with no useful message — verified against the live API.
-  const id = String(alert_id).trim();
-  const numericId = Number(id);
-  if (!Number.isFinite(numericId)) {
-    throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, `alert_id must be numeric, got: ${id}`);
+  // Normalise ONCE and compare against the normalised form everywhere.
+  // Caught in adversarial review: the request sent Number(id) while the
+  // post-delete verification compared String(a.alert_id) against the ORIGINAL
+  // string. So "00123" or "123.0" would delete alert 123 correctly and then
+  // report verified:false, because "123" !== "00123". A correct deletion
+  // reported as unverified is the mirror of the bug this file exists to fix.
+  const raw = String(alert_id).trim();
+  const numericId = Number(raw);
+  if (!Number.isInteger(numericId) || !Number.isSafeInteger(numericId) || numericId <= 0) {
+    throw new ClassifiedError(
+      CATEGORIES.INVALID_ARGUMENT,
+      `alert_id must be a positive integer, got: ${raw}`,
+      { hint: 'Alert ids come from alert_list and look like 5418097596.' },
+    );
   }
+  const id = String(numericId);
+
+  // "It is not in the list now" is NOT "I deleted it". Measured live on
+  // 2026-08-20: deleting id 999999999999, which never existed, returned
+  // success:true verified:true — the endpoint accepts any id, and the
+  // after-the-fact absence check passes trivially for something that was never
+  // there. Same defect as removeBulk calling a symbol it never touched
+  // "removed". Establish presence FIRST, so success means a real deletion.
+  const presentBefore = await _presentIds({ _deps });
+  if (presentBefore === null) {
+    throw new ClassifiedError(
+      CATEGORIES.API_UNEXPECTED,
+      'Could not read the alert list, so the deletion cannot be verified and was not attempted',
+      { hint: 'Usually an expired session. Reload TradingView, confirm you are logged in, and retry.' },
+    );
+  }
+  if (!presentBefore.has(id)) {
+    throw new ClassifiedError(
+      CATEGORIES.INVALID_ARGUMENT,
+      `No alert with id ${id} exists, so nothing was deleted`,
+      { hint: 'Call alert_list and use an alert_id from that response verbatim.' },
+    );
+  }
+
   const result = await evaluateAsync(`
     (async function() {
       try {
@@ -220,11 +349,30 @@ export async function deleteById({ alert_id, _deps } = {}) {
 
   // VERIFY from a separate read. The API's own "ok" is the action reporting on
   // itself, which is the failure mode this codebase keeps finding.
-  let verified = null;
-  try {
-    const after = await list({ _deps });
-    verified = !(after.alerts || []).some((a) => String(a.alert_id) === id);
-  } catch { verified = null; }
+  //
+  // TWO ways this was still wrong, both caught by independent audits:
+  //   1. `after.alerts || []` treated a FAILED read as an empty list, so an
+  //      expired session proved the alert was gone. Absence of evidence was
+  //      being recorded as evidence of absence.
+  //   2. success was hardcoded true, so verified:false — the fresh read finding
+  //      the alert still sitting there — still reported a successful delete.
+  //      That is exactly the bug this function was rewritten to fix.
+  const survivors = await _survivingIds([numericId], { _deps });
+  if (survivors === null) {
+    throw new ClassifiedError(
+      CATEGORIES.API_UNEXPECTED,
+      `The delete call for alert ${id} was accepted but the alert list could not be re-read, so the deletion is unconfirmed`,
+      { hint: 'Call alert_list to see the true current state before retrying.' },
+    );
+  }
+  const verified = !survivors.has(id);
+  if (!verified) {
+    throw new ClassifiedError(
+      CATEGORIES.API_UNEXPECTED,
+      `TradingView accepted the delete but alert ${id} is still in the list`,
+      { hint: 'Retry once. If it persists, delete it in the TradingView UI and report the alert_id.' },
+    );
+  }
 
-  return { success: true, source: 'pricealerts_api', alert_id: id, verified };
+  return { success: true, source: 'pricealerts_api', alert_id: id, verified: true };
 }

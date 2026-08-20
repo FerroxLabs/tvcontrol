@@ -83,14 +83,20 @@ describe('remove()', () => {
   it('SILENT-SUCCESS GUARD — the API says ok but the symbol is still there', async () => {
     // This is the exact failure that shipped in 2.2.3, now caught by the
     // second read instead of being reported as success.
+    //
+    // Returning {success:false} was not enough. importFrom called remove() in
+    // a try/catch and only counted a THROW as a failure, so a removal that
+    // reported its own failure still vanished from the import report. The
+    // single-symbol contract is "it worked, or you get an error".
     const { _deps } = scriptedDeps({}, [
       { ok: true, id: 42, name: 'Test', symbols: ['NASDAQ:AAPL'] },
       { ok: true, status: 200 },
       { ok: true, id: 42, name: 'Test', symbols: ['NASDAQ:AAPL'] },
     ]);
-    const result = await remove({ symbol: 'NASDAQ:AAPL', _deps });
-    assert.equal(result.success, false, 'a removal that did not happen must not report success');
-    assert.equal(result.verified, false);
+    await assert.rejects(
+      () => remove({ symbol: 'NASDAQ:AAPL', _deps }),
+      (err) => err.category === CATEGORIES.API_UNEXPECTED && /still in/.test(err.message),
+    );
   });
 
   it('symbol not in the list throws SYMBOL_UNKNOWN rather than silently passing', async () => {
@@ -240,7 +246,7 @@ describe('importFrom()', () => {
     writeFileSync(file, JSON.stringify({
       schema_version: 1,
       exported_at: new Date().toISOString(),
-      symbols: [{ symbol: 'AAPL' }, { symbol: 'NVDA' }],
+      symbols: [{ symbol: 'NASDAQ:AAPL' }, { symbol: 'NASDAQ:NVDA' }],
     }));
 
     // add() no longer types into a panel — it POSTs to the append endpoint and
@@ -255,8 +261,8 @@ describe('importFrom()', () => {
         // read 2: addBulk's before-read   -> AAPL only
         // read 3: addBulk's verify-read   -> AAPL + NVDA
         return listReads >= 3
-          ? { ok: true, id: 42, name: 'Test', symbols: ['AAPL', 'NVDA'] }
-          : { ok: true, id: 42, name: 'Test', symbols: ['AAPL'] };
+          ? { ok: true, id: 42, name: 'Test', symbols: ['NASDAQ:AAPL', 'NASDAQ:NVDA'] }
+          : { ok: true, id: 42, name: 'Test', symbols: ['NASDAQ:AAPL'] };
       },
       'append': { ok: true, status: 200 },
       'data-symbol-full': {},
@@ -265,8 +271,8 @@ describe('importFrom()', () => {
     const result = await importFrom({ file_path: file, mode: 'merge', _deps });
     assert.equal(result.success, true);
     assert.equal(result.mode, 'merge');
-    assert.deepEqual(result.skipped, ['AAPL']);
-    assert.deepEqual(result.added, ['NVDA']);
+    assert.deepEqual(result.skipped, ['NASDAQ:AAPL']);
+    assert.deepEqual(result.added, ['NASDAQ:NVDA']);
     assert.deepEqual(result.errors, []);
   });
 });

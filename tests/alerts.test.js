@@ -69,7 +69,7 @@ describe('deleteById()', () => {
     const { _deps } = emptyDeps();
     await assert.rejects(
       () => deleteById({ alert_id: 'aid_123', _deps }),
-      (err) => err.category === CATEGORIES.INVALID_ARGUMENT && /numeric/i.test(err.message),
+      (err) => err.category === CATEGORIES.INVALID_ARGUMENT && /positive integer/i.test(err.message),
     );
   });
 
@@ -83,31 +83,59 @@ describe('deleteById()', () => {
   });
 
   it('posts to the plural endpoint and verifies from a fresh list read', async () => {
+    // THREE calls now, not two. A presence read comes FIRST, because the
+    // endpoint accepts an id that never existed and the after-the-fact absence
+    // check then passes trivially — measured live on 2026-08-20.
     const { _deps, evaluate } = scriptedDeps({}, [
-      { ok: true, status: 200 },                       // delete_alerts
-      { alerts: [{ alert_id: 999, symbol: 'X' }] },    // list() — target absent
+      { alerts: [{ alert_id: 5418097596, symbol: 'X' }] },  // list() — target IS there
+      { ok: true, status: 200 },                            // delete_alerts
+      { alerts: [{ alert_id: 999, symbol: 'X' }] },         // list() — target gone
     ]);
     const result = await deleteById({ alert_id: '5418097596', _deps });
     assert.equal(result.success, true);
     assert.equal(result.verified, true);
     assert.equal(result.alert_id, '5418097596');
-    const posted = evaluate.calls[0];
+    const posted = evaluate.calls[1];
     assert.ok(posted.includes('delete_alerts'), 'must use the plural endpoint');
     assert.ok(posted.includes('5418097596'), 'the id must reach the request body');
     assert.ok(!posted.includes('"5418097596"'), 'the id must be a number, not a quoted string');
   });
 
-  it('SILENT-SUCCESS GUARD — API says ok but the alert is still listed', async () => {
+  it('refuses to "delete" an alert that never existed', async () => {
+    // Measured live: the endpoint returns ok for any id, and "it is not in the
+    // list afterwards" is trivially true for something that was never there.
+    // success:true verified:true for a no-op is the same shape as the bug this
+    // whole module was rewritten to remove.
     const { _deps } = scriptedDeps({}, [
+      { alerts: [{ alert_id: 111, symbol: 'X' }] },   // list() — target absent
+    ]);
+    await assert.rejects(
+      () => deleteById({ alert_id: '999999999999', _deps }),
+      (err) => err.category === CATEGORIES.INVALID_ARGUMENT && /never|exists/.test(err.message),
+    );
+  });
+
+  it('SILENT-SUCCESS GUARD — API says ok but the alert is still listed', async () => {
+    // This test used to assert only `verified === false` and let
+    // `success === true` stand beside it. Two independent audits pointed at
+    // this exact test: by accepting that pair it PERMITTED the defect it was
+    // named after. A caller branching on success — the documented convention
+    // everywhere in this codebase — saw a clean delete. The contract is now
+    // that a survivor throws.
+    const { _deps } = scriptedDeps({}, [
+      { alerts: [{ alert_id: 5418097596, symbol: 'X' }] },   // present before
       { ok: true, status: 200 },
       { alerts: [{ alert_id: 5418097596, symbol: 'X' }] },   // still there
     ]);
-    const result = await deleteById({ alert_id: '5418097596', _deps });
-    assert.equal(result.verified, false, 'verification must fail when the alert survives');
+    await assert.rejects(
+      () => deleteById({ alert_id: '5418097596', _deps }),
+      (err) => err.category === CATEGORIES.API_UNEXPECTED && /still in the list/.test(err.message),
+    );
   });
 
   it('throws a classified error when the API rejects the delete', async () => {
     const { _deps } = scriptedDeps({}, [
+      { alerts: [{ alert_id: 5418097596, symbol: 'X' }] },   // present before
       { ok: false, status: 200, error: 'code=no_such_endpoint' },
     ]);
     await assert.rejects(

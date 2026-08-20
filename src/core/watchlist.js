@@ -2,11 +2,12 @@
  * Core watchlist logic.
  * Uses TradingView's internal widget API with DOM fallback.
  */
-import { evaluate as _evaluate, evaluateAsync as _evaluateAsync, getClient as _getClient, safeString } from '../connection.js';
+import { evaluate as _evaluate, evaluateAsync as _evaluateAsync, getClient as _getClient } from '../connection.js';
 import { writeFileSync, readFileSync, mkdirSync, renameSync, existsSync } from 'node:fs';
 import { dirname, join, resolve, sep } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 import { ClassifiedError, CATEGORIES } from '../errors.js';
+import { symbolSearch } from './chart.js';
 import { parseJsonSafe } from './_json.js';
 
 function _resolve(deps) {
@@ -94,7 +95,10 @@ async function _apiActive(evaluateAsync) {
         var res = await fetch(${JSON.stringify(WL_API)} + 'active/', { credentials: 'include' });
         if (!res.ok) return { ok: false, status: res.status };
         var j = await res.json();
-        return { ok: true, id: j.id, name: j.name, symbols: j.symbols || [] };
+        // Hand back what the server actually said. Do NOT default symbols to []
+        // here: an error body would then be indistinguishable from an empty
+        // watchlist, and the caller would report success on a failed read.
+        return { ok: true, id: j && j.id, name: j && j.name, symbols: j && j.symbols, raw_keys: j ? Object.keys(j).slice(0, 12) : [] };
       } catch (e) { return { ok: false, error: e.message }; }
     })()
   `);
@@ -103,6 +107,16 @@ async function _apiActive(evaluateAsync) {
       CATEGORIES.API_UNEXPECTED,
       `Could not read the active watchlist (${r && r.status ? 'status ' + r.status : (r && r.error) || 'unknown'})`,
       { hint: 'Confirm you are logged in to TradingView in the attached session.' },
+    );
+  }
+  // A 200 carrying an error payload is the signature failure of this whole
+  // codebase. {"s":"error"} has no id and no symbols array, and without this
+  // gate it would surface as a perfectly healthy watchlist containing nothing.
+  if (r.id === undefined || r.id === null || !Array.isArray(r.symbols)) {
+    throw new ClassifiedError(
+      CATEGORIES.API_UNEXPECTED,
+      `The watchlist endpoint returned 200 but not a watchlist (keys: ${(r.raw_keys || []).join(', ') || 'none'})`,
+      { hint: 'Usually an expired session. Reload TradingView, confirm you are logged in, and retry.' },
     );
   }
   return r;
@@ -142,96 +156,170 @@ export async function get({ _deps } = {}) {
   const symbols = api.symbols.filter((x) => !_isHeader(x));
   const sections = api.symbols.filter((x) => _isHeader(x));
 
-  // Prices only exist in the rendered widget. Best effort: enrich if the panel
-  // is open, otherwise return membership without quotes rather than failing.
+  // Prices only exist in the rendered widget, and the widget is not guaranteed
+  // to be showing the list the API calls "active". MEASURED on a live account
+  // 2026-08-20: the API returned RebelUOS (29 crypto symbols) while the panel
+  // rendered a different list entirely (59 equities). Zero overlap.
+  //
+  // So enrichment is keyed by symbol and MATCHED, never assumed. The previous
+  // shape set quotes_available from "the DOM gave me some rows", which was true
+  // while not one of the 29 returned symbols carried a price — the same lie
+  // this module exists to stop telling, just smaller.
   let quotes = {};
+  let domSymbolCount = 0;
   try {
     await _ensureWatchlistOpen(evaluate, wait);
     const rows = await evaluate(`
       (function() {
-        function norm(t) { return String(t || '').replace(/−/g, '-').trim(); }
+        function norm(t) { return String(t || '').replace(/\u2212/g, '-').trim(); }
         var out = {};
         var nodes = document.querySelectorAll('[data-symbol-full]');
         for (var i = 0; i < nodes.length; i++) {
           var full = nodes[i].getAttribute('data-symbol-full');
           if (!full || out[full]) continue;
+          // The cells live under the [data-symbol-full] element itself on the
+          // current build. Climbing to a '[class*="row"]' ancestor finds
+          // nothing — that class no longer exists — so try the node first and
+          // only climb if it is barren.
           var cells = nodes[i].querySelectorAll('[class*="cell"]');
+          if (!cells.length) {
+            var up = nodes[i].closest('[class*="row"]') || nodes[i].parentElement;
+            if (up) cells = up.querySelectorAll('[class*="cell"]');
+          }
           var vals = [];
-          for (var c = 0; c < cells.length; c++) vals.push(norm(cells[c].textContent));
-          out[full] = vals;
+          for (var c = 0; c < cells.length; c++) {
+            var t = norm(cells[c].textContent);
+            if (t) vals.push(t);
+          }
+          if (vals.length) out[full] = vals;
         }
         return out;
       })()
     `);
     if (rows && typeof rows === 'object') quotes = rows;
+    domSymbolCount = Object.keys(quotes).length;
   } catch { /* panel closed or layout changed; membership still stands */ }
+
+  const enriched = symbols.map((sym) => (quotes[sym] && quotes[sym].length ? { symbol: sym, cells: quotes[sym] } : { symbol: sym }));
+  const matchedQuotes = enriched.filter((x) => x.cells).length;
 
   return {
     success: true,
     watchlist: api.name,
     watchlist_id: api.id,
     count: symbols.length,
-    symbols: symbols.map((sym) => (quotes[sym] && quotes[sym].length ? { symbol: sym, cells: quotes[sym] } : { symbol: sym })),
+    symbols: enriched,
     sections,
-    quotes_available: Object.keys(quotes).length > 0,
+    // True only when a symbol IN THIS LIST actually carries a price.
+    quotes_available: matchedQuotes > 0,
+    quotes_matched: matchedQuotes,
+    // The panel is rendering symbols, none of which are in this list. Almost
+    // always means the visible watchlist is not the active one. Worth saying
+    // out loud rather than returning a silently price-free list.
+    ...(matchedQuotes === 0 && domSymbolCount > 0
+      ? { quote_note: `The watchlist panel is showing ${domSymbolCount} symbol(s) from a different list, so no prices could be attached. Membership below is authoritative.` }
+      : {}),
     source: 'symbols_list_api',
   };
 }
 
-// Fuzzy-match a user-supplied symbol against the watchlist's actual
-// data-symbol-full values. Users commonly pass bare tickers ("AAPL") while
-// TradingView stores the exchange-prefixed form ("NASDAQ:AAPL"). Exact hit
-// wins; otherwise suffix/prefix match by ticker. Returns the stored form
-// or null if not present.
-async function _resolveStoredSymbol(evaluate, symbol) {
-  const result = await evaluate(`
-    (function() {
-      var want = ${JSON.stringify(String(symbol).toUpperCase())};
-      var rows = document.querySelectorAll('[data-symbol-full]');
-      var stored = [];
-      for (var i = 0; i < rows.length; i++) {
-        var sf = rows[i].getAttribute('data-symbol-full') || '';
-        if (!sf) continue;
-        stored.push(sf);
-        var up = sf.toUpperCase();
-        if (up === want) return { match: 'exact', symbolFull: sf };
-      }
-      for (var j = 0; j < stored.length; j++) {
-        var up2 = stored[j].toUpperCase();
-        if (up2.endsWith(':' + want) || up2.startsWith(want + ':')) {
-          return { match: 'fuzzy', symbolFull: stored[j] };
-        }
-      }
-      return { match: null };
-    })()
-  `);
-  return result?.symbolFull || null;
+// Reject what cannot be acted on BEFORE any read or mutation. The old code
+// trimmed and then filtered empties away, so watchlist_add("   ") reduced to
+// an empty wanted[] and `[].every(...)` returned true: success on a call that
+// touched nothing. An empty array is not evidence of success.
+//
+// Duplicates are collapsed here too. Posting ["A","A"] made added_count report
+// two additions for one actual row.
+function _cleanSymbols(symbols) {
+  if (!Array.isArray(symbols) || symbols.length === 0) {
+    throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'symbols must be a non-empty array');
+  }
+  const seen = new Set();
+  const out = [];
+  for (const raw of symbols) {
+    const v = String(raw == null ? '' : raw).trim();
+    if (!v) continue;
+    if (seen.has(v)) continue;
+    seen.add(v);
+    out.push(v);
+  }
+  if (out.length === 0) {
+    throw new ClassifiedError(
+      CATEGORIES.INVALID_ARGUMENT,
+      'No usable symbols: every entry was empty or whitespace',
+      { hint: 'Pass exchange-prefixed symbols, e.g. ["NASDAQ:TSLA"]. Call watchlist_get for the exact stored spelling.' },
+    );
+  }
+  return out;
 }
 
-async function _currentSymbolsSet(evaluate) {
-  const r = await evaluate(`
-    (function() {
-      var rows = document.querySelectorAll('[data-symbol-full]');
-      var out = [];
-      var seen = {};
-      for (var i = 0; i < rows.length; i++) {
-        var sf = rows[i].getAttribute('data-symbol-full') || '';
-        if (sf && !seen[sf]) { seen[sf] = true; out.push(sf); }
-      }
-      return out;
-    })()
-  `);
-  return new Set(Array.isArray(r) ? r : []);
+// A BARE TICKER IS STORED VERBATIM. Confirmed against the live API on
+// 2026-08-20: POST /append/ with ["KO"] stores the literal string "KO", it does
+// not resolve to "NYSE:KO". The old DOM path went through TradingView's own
+// autocomplete and therefore always wrote the exchange-qualified form; the REST
+// rewrite lost that, and the verification made it worse rather than better —
+// the follow-up read finds the exact string we posted, so add() cheerfully
+// reported success for a row TradingView may never resolve to an instrument.
+//
+// So resolve first and post the resolved form. If it cannot be resolved, that
+// is a caller error worth stopping on, not a broken row worth creating.
+async function _resolveBare(sym, _deps) {
+  if (sym.includes(':')) return sym;           // already exchange-qualified
+  if (_isHeader(sym)) return sym;              // section furniture, not a symbol
+  let found;
+  try {
+    const r = await symbolSearch({ query: sym, _deps });
+    found = (r.results || []).find((x) => String(x.symbol).toUpperCase() === sym.toUpperCase());
+  } catch (err) {
+    throw new ClassifiedError(
+      CATEGORIES.INVALID_ARGUMENT,
+      `Could not resolve the bare ticker "${sym}" (symbol search failed: ${err.message})`,
+      { hint: `Pass the exchange-prefixed form directly, e.g. NASDAQ:${sym.toUpperCase()}.` },
+    );
+  }
+  if (!found || !found.full_name || !found.full_name.includes(':')) {
+    throw new ClassifiedError(
+      CATEGORIES.SYMBOL_UNKNOWN,
+      `"${sym}" does not resolve to a TradingView instrument`,
+      { hint: 'Call symbol_search to find the exchange-prefixed name, then pass that.' },
+    );
+  }
+  return found.full_name;
+}
+
+// Both mutations read the active list before and after. If the operator (or
+// another tab) switches the active watchlist mid-flight, the "after" read
+// describes a DIFFERENT list, and a symbol that list already contained would
+// verify as a successful add to a list we never touched.
+function _assertSameList(before, after, verb) {
+  if (String(before.id) !== String(after.id)) {
+    throw new ClassifiedError(
+      CATEGORIES.API_UNEXPECTED,
+      `The active watchlist changed during the ${verb} (${before.name} -> ${after.name}); the result could not be verified`,
+      { hint: 'Avoid switching watchlists while a bulk operation runs, then retry.' },
+    );
+  }
 }
 
 export async function add({ symbol, _deps }) {
-  if (!symbol || typeof symbol !== 'string') {
+  if (!symbol || typeof symbol !== 'string' || !symbol.trim()) {
     throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'symbol must be a non-empty string');
   }
   const res = await addBulk({ symbols: [symbol], _deps });
   const one = res.results && res.results[0];
+  // THROW when the independent read says it did not take. The single-symbol
+  // contract is "it worked or you get an error" — importFrom and the CLI both
+  // rely on that, and returning {success:false} instead let a failed add be
+  // counted as added one layer up.
+  if (!res.success) {
+    throw new ClassifiedError(
+      CATEGORIES.API_UNEXPECTED,
+      `The API accepted the add but ${symbol} is still not in ${res.watchlist}`,
+      { hint: 'TradingView may have rejected the symbol. Confirm the exchange-prefixed spelling with symbol_search.' },
+    );
+  }
   return {
-    success: res.success,
+    success: true,
     symbol: (one && one.symbol) || symbol,
     already_present: (one && one.already_present) || false,
     watchlist: res.watchlist,
@@ -241,19 +329,25 @@ export async function add({ symbol, _deps }) {
 }
 
 export async function addBulk({ symbols, _deps }) {
-  if (!Array.isArray(symbols) || symbols.length === 0) {
-    throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'symbols must be a non-empty array');
-  }
   const { evaluateAsync } = _resolve(_deps);
+  const requested = _cleanSymbols(symbols);
   const before = await _apiActive(evaluateAsync);
   const had = new Set(before.symbols.map(String));
-  const wanted = symbols.map((x) => String(x).trim()).filter(Boolean);
+
+  // Resolve bare tickers BEFORE the membership check, so "AAPL" is compared
+  // against the stored "NASDAQ:AAPL" rather than being posted as a new row.
+  const resolved = [];
+  for (const sym of requested) {
+    resolved.push(had.has(sym) ? sym : await _resolveBare(sym, _deps));
+  }
+  const wanted = [...new Set(resolved)];
   const missing = wanted.filter((x) => !had.has(x));
 
   if (missing.length) await _apiMutate(evaluateAsync, before.id, 'append', missing);
 
   // VERIFY from a fresh read, not from the mutation's own response.
   const after = await _apiActive(evaluateAsync);
+  _assertSameList(before, after, 'add');
   const now = new Set(after.symbols.map(String));
   const results = wanted.map((x) => ({ symbol: x, added: now.has(x), already_present: had.has(x) }));
   const allThere = results.every((r) => r.added);
@@ -263,6 +357,7 @@ export async function addBulk({ symbols, _deps }) {
     watchlist_id: after.id,
     count: after.symbols.filter((x) => !_isHeader(x)).length,
     added_count: results.filter((r) => r.added && !r.already_present).length,
+    not_added: results.filter((r) => !r.added).map((r) => r.symbol),
     results,
     verified: allThere,
     source: 'symbols_list_api',
@@ -270,7 +365,7 @@ export async function addBulk({ symbols, _deps }) {
 }
 
 export async function remove({ symbol, _deps }) {
-  if (!symbol || typeof symbol !== 'string') {
+  if (!symbol || typeof symbol !== 'string' || !symbol.trim()) {
     throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'symbol must be a non-empty string');
   }
   const res = await removeBulk({ symbols: [symbol], _deps });
@@ -282,8 +377,16 @@ export async function remove({ symbol, _deps }) {
       { hint: 'Call watchlist_get for exact stored names; they are exchange-prefixed (e.g. NASDAQ:TSLA).' },
     );
   }
+  // Present before, still present after: the API said ok and nothing happened.
+  if (!res.success) {
+    throw new ClassifiedError(
+      CATEGORIES.API_UNEXPECTED,
+      `The API accepted the removal but ${symbol} is still in ${res.watchlist}`,
+      { hint: 'Retry once; if it persists, remove it in the TradingView UI and report the symbol.' },
+    );
+  }
   return {
-    success: res.success,
+    success: true,
     symbol: (one && one.symbol) || symbol,
     watchlist: res.watchlist,
     count: res.count,
@@ -292,30 +395,36 @@ export async function remove({ symbol, _deps }) {
 }
 
 export async function removeBulk({ symbols, _deps }) {
-  if (!Array.isArray(symbols) || symbols.length === 0) {
-    throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'symbols must be a non-empty array');
-  }
   const { evaluateAsync } = _resolve(_deps);
+  const wanted = _cleanSymbols(symbols);
   const before = await _apiActive(evaluateAsync);
   const had = new Set(before.symbols.map(String));
-  const wanted = symbols.map((x) => String(x).trim()).filter(Boolean);
   const present = wanted.filter((x) => had.has(x));
 
   if (present.length) await _apiMutate(evaluateAsync, before.id, 'remove', present);
 
   const after = await _apiActive(evaluateAsync);
+  _assertSameList(before, after, 'remove');
   const now = new Set(after.symbols.map(String));
   const results = wanted.map((x) => ({ symbol: x, was_present: had.has(x), removed: had.has(x) && !now.has(x) }));
-  const ok = results.every((r) => !r.was_present || r.removed);
+
+  // "You asked me to remove AAPL, I did nothing, here is success:true" is the
+  // 2.2.3 bug wearing a different hat. A symbol that was never there was NOT
+  // removed. not_found is still reported separately so the caller can tell the
+  // two failure shapes apart.
+  const removedAll = results.every((r) => r.removed);
+  const notFound = results.filter((r) => !r.was_present).map((r) => r.symbol);
+  const survived = results.filter((r) => r.was_present && !r.removed).map((r) => r.symbol);
   return {
-    success: ok,
+    success: removedAll,
     watchlist: after.name,
     watchlist_id: after.id,
     count: after.symbols.filter((x) => !_isHeader(x)).length,
     removed_count: results.filter((r) => r.removed).length,
-    not_found: results.filter((r) => !r.was_present).map((r) => r.symbol),
+    not_found: notFound,
+    survived,
     results,
-    verified: ok,
+    verified: removedAll,
     source: 'symbols_list_api',
   };
 }
@@ -428,7 +537,13 @@ export async function importFrom({ file_path, mode = 'merge', dry_run = false, _
     for (const s of current.symbols) {
       if (!incomingSet.has(s.symbol)) {
         try {
-          await remove({ symbol: s.symbol, _deps });
+          // remove() throws when its own verify read fails, but check the
+          // returned flag too: this loop is the layer where a failure that is
+          // merely REPORTED rather than thrown used to disappear.
+          const r = await remove({ symbol: s.symbol, _deps });
+          if (r && r.success === false) {
+            errors.push({ symbol: s.symbol, error: 'removal was not confirmed by the follow-up read' });
+          }
         } catch (err) {
           errors.push({ symbol: s.symbol, error: err.message });
         }
@@ -446,7 +561,15 @@ export async function importFrom({ file_path, mode = 'merge', dry_run = false, _
       continue;
     }
     try {
-      await add({ symbol: sym, _deps });
+      // Never push to added[] on the strength of "the call returned". add()
+      // throws on a failed verification now; the explicit success check is the
+      // second lock, because this exact line reported imports that never
+      // happened as clean successes.
+      const r = await add({ symbol: sym, _deps });
+      if (r && r.success === false) {
+        errors.push({ symbol: sym, error: 'the add was not confirmed by the follow-up read' });
+        continue;
+      }
       added.push(sym);
       currentSet.add(sym);
     } catch (err) {

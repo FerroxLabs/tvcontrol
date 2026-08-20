@@ -4,9 +4,12 @@ ijfw_schema: 1
 type: software
 primary_type: software
 secondary_types: []
-confidence: 0.907
-detected_at: 2026-05-27T12:45:31.375Z
+confidence: 0.943
+detected_at: 2026-08-04T03:14:01.865Z
 signals:
+  - kind: agents_md_frontmatter
+    weight: 0.9
+    value: software
   - kind: manifest
     weight: 0.9
     manifests: [package.json]
@@ -17,7 +20,7 @@ signals:
     weight: 0.7
     domain: software
     ratio: 1
-    count: 85
+    count: 126
 ---
 # AGENTS.md
 
@@ -236,9 +239,6 @@ Read once. Edit sections 10 and 11 for your project. Prune the rest over time. T
 
 <!-- IJFW-MEMORY-START -->
 Project memory at .ijfw/memory/. Call `ijfw_memory_prelude` for full context.
-
-Last handoff: # MOVED — see parent dir
-The session-3 handoff lives one directory up:
 <!-- IJFW-MEMORY-END -->
 
 <!-- IJFW-ROUTING-START -->

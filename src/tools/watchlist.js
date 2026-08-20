@@ -3,13 +3,13 @@ import { jsonResult, errorResult } from './_format.js';
 import * as core from '../core/watchlist.js';
 
 export function registerWatchlistTools(server) {
-  server.tool('watchlist_get', 'Get all symbols from the current TradingView watchlist with last price, change, and change%', {}, async () => {
+  server.tool('watchlist_get', 'Get every symbol in the active TradingView watchlist. Membership comes from the symbols_list API so it is complete even when the panel is scrolled or closed. Quote cells are best effort and only present when the watchlist panel is open; check quotes_available.', {}, async () => {
     try { return jsonResult(await core.get()); }
     catch (err) { return errorResult(err); }
   });
 
   server.tool('watchlist_add', 'Add a symbol to the TradingView watchlist', {
-    symbol: z.string().describe('Symbol to add (e.g., AAPL, BTCUSD, ES1!, NYMEX:CL1!)'),
+    symbol: z.string().describe('Exchange-prefixed symbol, e.g. NASDAQ:AAPL or NYMEX:CL1!. A bare ticker is stored verbatim and may not resolve; call symbol_search or watchlist_get for the exact stored spelling.'),
   }, async ({ symbol }) => {
     try { return jsonResult(await core.add({ symbol })); }
     catch (err) {
@@ -25,7 +25,7 @@ export function registerWatchlistTools(server) {
   });
 
   server.tool('watchlist_add_bulk', 'Add multiple symbols sequentially and report per-symbol results', {
-    symbols: z.array(z.string()).min(1).max(100).describe('Symbols to add'),
+    symbols: z.array(z.string()).min(1).max(100).describe('Exchange-prefixed symbols, e.g. ["NASDAQ:AAPL","NYSE:GE"]. Duplicates are collapsed. success is true only when a follow-up read confirms every symbol is present.'),
   }, async ({ symbols }) => {
     try { return jsonResult(await core.addBulk({ symbols })); }
     catch (err) { return errorResult(err); }
