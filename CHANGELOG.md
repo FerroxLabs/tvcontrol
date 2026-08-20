@@ -2,6 +2,25 @@
 
 All notable changes to TVControl are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [2.2.4] - 2026-08-20
+
+Found by calling all 101 registered tools against a live account and verifying each effect from an independent read, rather than by reading code. Three of them were broken in ways that reported success or returned nothing usable.
+
+### Fixed
+
+- **The watchlist is rebuilt on TradingView's REST API.** Every operation used to be DOM automation — press the add button, or right-click a row and hunt for "Remove" in a context menu. Measured against a live account: `watchlist_remove` reported a click and left the symbol in place; `watchlist_remove_bulk` returned `removed_count: 0`; and `watchlist_get` reported three symbols absent while the account held all of them, because the DOM only contains *rendered* rows. That read is the worst of the three — a membership check that silently under-reports is more dangerous than one that fails, because callers act on it. `get`, `add`, `add_bulk`, `remove` and `remove_bulk` now use `/api/v1/symbols_list/`, and each verifies the result from a second read instead of trusting the mutation's own response. Section headers (`###CORE BASKET`) no longer inflate symbol counts. Price data is still read from the widget when it is open, best-effort.
+- **`batch_run` gained `get_study_values`, the action it always documented.** The server's tool guide and the market-open scan skill both instruct callers to run `batch_run({action: "get_study_values"})` to sweep a universe in one call — it is the central step of that workflow. The action existed in neither the schema enum nor the core's allowlist, so every such call died at validation and the documented scan was impossible. Now implemented, and verified returning full indicator values for AAPL and MSFT.
+- **`alert_delete_by_id` called an endpoint that does not exist.** `POST /delete_alert` (singular) answers with HTTP 200 and an error *body*, so the old code read the 200, fell through to a DOM path that cannot delete a single alert, and returned failure for something the API does fine. It now posts to `/delete_alerts` with a one-element array — and the id must be numeric, since a string returns a bare `{"s":"error"}`. Verified live: 164 alerts → create → 165 → delete → 164.
+
+### Added
+
+- `tests/watchlist_api.test.js`, `tests/batch_actions.test.js` and `tests/alert_delete_endpoint.test.js`. All are confirmed to fail against the pre-fix source. The batch test asserts that the tool's enum and the core's allowlist agree, because updating one without the other leaves the action dead — which is how the first attempt at that fix failed.
+
+### Notes
+
+- A tool that fails without a readable reason cannot be debugged. Several failures in this sweep surfaced as `undefined: undefined`; where those turned out to be caller error, the tools now say so.
+- 54 of 101 tools mutate live state and were exercised with save/verify/restore against a real account. The remainder are documented as deliberately skipped rather than quietly untested.
+
 ## [2.2.3] - 2026-08-20
 
 ### Fixed
