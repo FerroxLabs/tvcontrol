@@ -1,0 +1,38 @@
+#!/bin/sh
+# Refuse to push private trading research to a PUBLIC repository.
+#
+# WHY THIS EXISTS. On 2026-08-20 a routine "push the fix" would have published
+# 13,530 files to github.com/FerroxLabs/tvcontrol, which is public: the whole
+# skills/market-open-report tree, TC-TIDE-PRO.pine, the strategy audits, the
+# crypto findings and the copy briefs. origin/main had none of it. The only
+# thing that stopped it was checking the file list first, which is not a control.
+#
+# Bypass deliberately with: git push --no-verify
+PATTERN='^skills/market-open-report/|\.pine$|FINDINGS\.md$|^AUDIT|COPY-BRIEF|HANDOFF-.*\.md$'
+
+remote_sha_range() {
+  while read -r _local_ref local_sha _remote_ref remote_sha; do
+    [ "$local_sha" = "0000000000000000000000000000000000000000" ] && continue
+    if [ "$remote_sha" = "0000000000000000000000000000000000000000" ]; then
+      git diff --name-only "$(git merge-base origin/main "$local_sha" 2>/dev/null || echo origin/main)" "$local_sha"
+    else
+      git diff --name-only "$remote_sha" "$local_sha"
+    fi
+  done
+}
+
+OFFENDING=$(remote_sha_range | grep -E "$PATTERN" | head -20)
+if [ -n "$OFFENDING" ]; then
+  COUNT=$(remote_sha_range | grep -cE "$PATTERN")
+  echo "" >&2
+  echo "PUSH BLOCKED: $COUNT private research file(s) in this push." >&2
+  echo "github.com/FerroxLabs/tvcontrol is PUBLIC." >&2
+  echo "" >&2
+  echo "$OFFENDING" | sed 's/^/  /' >&2
+  echo "" >&2
+  echo "Trading research belongs in a private repo, not here." >&2
+  echo "If this is genuinely intended: git push --no-verify" >&2
+  echo "" >&2
+  exit 1
+fi
+exit 0
