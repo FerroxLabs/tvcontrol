@@ -47,6 +47,21 @@ export async function click({ by, value }) {
   return { success: true, clicked: result };
 }
 
+// Is the Pine editor ACTUALLY on screen? Existence in the DOM is not enough:
+// TradingView keeps a collapsed 0x0 `.monaco-editor.pine-editor-monaco` node
+// around permanently, so `!!querySelector(...)` answers true for an editor the
+// user cannot see and no tool can write to. Measure it.
+const PINE_VISIBLE = `
+  (function() {
+    var nodes = document.querySelectorAll('.monaco-editor.pine-editor-monaco');
+    for (var i = 0; i < nodes.length; i++) {
+      var b = nodes[i].getBoundingClientRect();
+      if (b.width > 0 && b.height > 0) return true;
+    }
+    return false;
+  })()
+`;
+
 export async function openPanel({ panel, action }) {
   const isBottomPanel = panel === 'pine-editor' || panel === 'strategy-tester';
   if (isBottomPanel) {
@@ -54,30 +69,135 @@ export async function openPanel({ panel, action }) {
     const result = await evaluate(`
       (function() {
         var bwb = window.TradingView && window.TradingView.bottomWidgetBar;
-        if (!bwb) return { error: 'bottomWidgetBar not available' };
         var panel = ${JSON.stringify(panel)};
         var widgetName = ${JSON.stringify(widgetName)};
         var action = ${JSON.stringify(action)};
         var bottomArea = document.querySelector('[class*="layout__area--bottom"]');
         var isOpen = !!(bottomArea && bottomArea.offsetHeight > 50);
-        if (panel === 'pine-editor') { var monacoEl = document.querySelector('.monaco-editor.pine-editor-monaco'); isOpen = isOpen && !!monacoEl; }
+        if (panel === 'pine-editor') {
+          // Measured, not merely present. See PINE_VISIBLE above.
+          var pineVisible = false;
+          var pineNodes = document.querySelectorAll('.monaco-editor.pine-editor-monaco');
+          for (var pi = 0; pi < pineNodes.length; pi++) {
+            var pb = pineNodes[pi].getBoundingClientRect();
+            if (pb.width > 0 && pb.height > 0) { pineVisible = true; break; }
+          }
+          isOpen = pineVisible;
+        }
         if (panel === 'strategy-tester') { var stratPanel = document.querySelector('[data-name="backtesting"]') || document.querySelector('[class*="strategyReport"]'); isOpen = isOpen && !!(stratPanel && stratPanel.offsetParent); }
         var performed = 'none';
         if (action === 'open' || (action === 'toggle' && !isOpen)) {
-          if (panel === 'pine-editor') { if (typeof bwb.activateScriptEditorTab === 'function') bwb.activateScriptEditorTab(); else if (typeof bwb.showWidget === 'function') bwb.showWidget(widgetName); }
-          else { if (typeof bwb.showWidget === 'function') bwb.showWidget(widgetName); }
+          // DESKTOP 3.3.0 MOVED THE PINE EDITOR INTO A DIALOG. The bottom
+          // widget bar either is not present or opens a zero-height panel, and
+          // the old code reported 'opened' either way. Try the widget bar, then
+          // the dialog button, and let the caller verify.
+          var acted = false;
+          if (panel === 'pine-editor') {
+            // ORDER MATTERS. The previous version called bottomWidgetBar
+            // FIRST and clicked the dialog button only as a fallback.
+            //
+            // MEASURED, and the platform split is the surprising part. The
+            // same 9-transition open/open-when-open/close cycle was run
+            // against live charts on three environments:
+            //
+            //   macOS   + Desktop 3.3.0   old order FAILS   new order 9/9
+            //   Windows + Desktop 3.3.0   old order works   new order 9/9
+            //   Windows + Chrome web      old order works   new order 9/9
+            //
+            // So this is a macOS-specific failure, NOT a Desktop-versus-web
+            // one. On macOS the widget-bar call leaves the editor shut and
+            // apparently leaves TradingView believing it is already open, so
+            // the click that follows is ignored and open never happens.
+            // bottomWidgetBar exists on every one of those builds and its
+            // methods never throw, which is why the old code believed it had
+            // worked.
+            //
+            // IF YOU ARE ON WINDOWS AND THE OLD ORDER LOOKS FINE: it is fine,
+            // there. It is broken on macOS. Do not revert this on the strength
+            // of a Windows test.
+            //
+            // So on any build that HAS the dialog button, that button is the
+            // only thing used. bottomWidgetBar is kept solely for older builds
+            // that predate the dialog.
+            var dlgBtn = document.querySelector('[data-name="pine-dialog-button"]')
+              || document.querySelector('[aria-label="Pine"]');
+            if (dlgBtn) {
+              // The button OPENS and does not toggle: verified by clicking it
+              // twice against a live chart, which left the editor open both
+              // times. Safe to click without first checking whether it is open.
+              dlgBtn.click(); acted = true;
+            } else if (bwb && typeof bwb.activateScriptEditorTab === 'function') {
+              bwb.activateScriptEditorTab(); acted = true;
+            } else if (bwb && typeof bwb.showWidget === 'function') {
+              bwb.showWidget(widgetName); acted = true;
+            }
+          } else if (bwb && typeof bwb.showWidget === 'function') {
+            bwb.showWidget(widgetName); acted = true;
+          }
+          if (!acted) return { error: 'no way to open ' + panel + ' in this build' };
           performed = 'opened';
         } else if (action === 'close' || (action === 'toggle' && isOpen)) {
-          if (typeof bwb.hideWidget === 'function') bwb.hideWidget(widgetName);
-          else if (typeof bwb.close === 'function') bwb.close();
-          else if (typeof bwb.hide === 'function') bwb.hide();
+          // Same dialog problem as opening. hideWidget only knows the bottom
+          // panel, so on Desktop 3.3.0 the close silently did nothing while
+          // reporting 'closed'. The dialog button toggles, so clicking it while
+          // the editor is visible closes it.
+          var closed = false;
+          if (bwb && typeof bwb.hideWidget === 'function') { bwb.hideWidget(widgetName); closed = true; }
+          else if (bwb && typeof bwb.close === 'function') { bwb.close(); closed = true; }
+          else if (bwb && typeof bwb.hide === 'function') { bwb.hide(); closed = true; }
+          if (panel === 'pine-editor') {
+            // Re-measure: hideWidget may have been a no-op for the dialog.
+            var stillVisible = false;
+            var vNodes = document.querySelectorAll('.monaco-editor.pine-editor-monaco');
+            for (var vi = 0; vi < vNodes.length; vi++) {
+              var vb = vNodes[vi].getBoundingClientRect();
+              if (vb.width > 0 && vb.height > 0) { stillVisible = true; break; }
+            }
+            if (stillVisible) {
+              // NOT the pine-dialog-button: that OPENS the dialog and does not
+              // toggle it, so clicking it here left the editor open while the
+              // call reported closed. The dialog carries its own Close control.
+              var dlg = document.querySelector('[data-name="pine-dialog"]');
+              var closeBtn = dlg && (dlg.querySelector('[aria-label="Close"]')
+                || dlg.querySelector('[aria-label="Collapse panel"]'));
+              if (closeBtn) { closeBtn.click(); closed = true; }
+              else closed = false;
+            }
+          }
+          if (!closed) return { error: 'no way to close ' + panel + ' in this build' };
           performed = 'closed';
         }
         return { was_open: isOpen, performed: performed };
       })()
     `);
     if (result && result.error) throw new ClassifiedError(CATEGORIES.API_UNEXPECTED, result.error);
-    return { success: true, panel, action, was_open: result?.was_open ?? false, performed: result?.performed ?? 'unknown' };
+
+    // VERIFY. The old version returned success without ever looking, which is
+    // how "opened" came back for a panel that stayed shut and sent callers
+    // hunting for imaginary bugs downstream. Only pine-editor can be checked
+    // cheaply and unambiguously, so that is the one that is checked.
+    let verified = null;
+    if (panel === 'pine-editor' && (result?.performed === 'opened' || result?.performed === 'closed')) {
+      const want = result.performed === 'opened';
+      for (let i = 0; i < 12; i++) {
+        const vis = await evaluate(PINE_VISIBLE);
+        if (vis === want) { verified = true; break; }
+        await new Promise(r => setTimeout(r, 250));
+      }
+      if (verified === null) verified = false;
+    }
+    if (verified === false) {
+      throw new ClassifiedError(
+        CATEGORIES.TV_UI_CHANGED,
+        'Asked to ' + action + ' the ' + panel + ' but it did not ' +
+        (result.performed === 'opened' ? 'become visible' : 'close') +
+        '. In TradingView Desktop 3.3.0 the Pine editor is a dialog behind ' +
+        '[data-name="pine-dialog-button"], not a bottom panel.'
+      );
+    }
+    return { success: true, panel, action, was_open: result?.was_open ?? false,
+             performed: result?.performed ?? 'unknown',
+             ...(verified === true ? { verified: true } : {}) };
   } else {
     const selectorMap = {
       'watchlist': {

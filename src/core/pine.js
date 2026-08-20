@@ -20,15 +20,39 @@ function _escapeRegex(s) {
 }
 
 // ── Monaco finder (injected into TV page) ──
+//
+// TWO BUGS LIVED HERE AND BOTH WERE SILENT. Found 2026-08-20 after four rounds
+// of Pine edits vanished while every signal reported success.
+//
+// 1. THE PAGE HOLDS MORE THAN ONE `.monaco-editor.pine-editor-monaco` NODE.
+//    One is a collapsed 0x0 element that is never mounted and carries no React
+//    fiber. `querySelector` returns THAT one first, so the fiber walk failed and
+//    every caller concluded "Pine editor closed" while the editor was plainly
+//    open on screen. Pick by geometry, not by document order.
+//
+// 2. `getEditors()` RETURNS SEVERAL EDITORS AND INDEX 0 IS DETACHED. Writing to
+//    it compiled clean, reported "Saved", never bumped the script version, and
+//    left the chart running the previous code. Nothing in the UI contradicted
+//    it. Match the editor to the visible container by DOM node instead.
+//
+// Both fallbacks are deliberate: prefer the geometrically visible container and
+// the DOM-matched editor, but rather than returning null when the page shape
+// changes again, fall back to the LAST editor, which has never been the
+// detached one in any build observed.
 const FIND_MONACO = `
   (function findMonacoEditor() {
-    var container = document.querySelector('.monaco-editor.pine-editor-monaco');
+    var nodes = document.querySelectorAll('.monaco-editor.pine-editor-monaco');
+    var container = null;
+    for (var n = 0; n < nodes.length; n++) {
+      var box = nodes[n].getBoundingClientRect();
+      if (box.width > 0 && box.height > 0) { container = nodes[n]; break; }
+    }
     if (!container) return null;
     var el = container;
     var fiberKey;
-    for (var i = 0; i < 20; i++) {
+    for (var i = 0; i < 25; i++) {
       if (!el) break;
-      fiberKey = Object.keys(el).find(function(k) { return k.startsWith('__reactFiber$'); });
+      fiberKey = Object.getOwnPropertyNames(el).find(function(k) { return k.indexOf('__reactFiber') === 0; });
       if (fiberKey) break;
       el = el.parentElement;
     }
@@ -40,7 +64,17 @@ const FIND_MONACO = `
         var env = current.memoizedProps.value.monacoEnv;
         if (env.editor && typeof env.editor.getEditors === 'function') {
           var editors = env.editor.getEditors();
-          if (editors.length > 0) return { editor: editors[0], env: env };
+          if (!editors || editors.length === 0) return null;
+          var pick = null;
+          for (var z = 0; z < editors.length; z++) {
+            var dom = editors[z].getDomNode && editors[z].getDomNode();
+            if (dom && (dom === container || container.contains(dom) || dom.contains(container))) {
+              pick = editors[z];
+              break;
+            }
+          }
+          if (!pick) pick = editors[editors.length - 1];
+          return { editor: pick, env: env };
         }
       }
       current = current.return;
@@ -479,17 +513,32 @@ export async function setSource({ source }) {
   if (!editorReady) throw new ClassifiedError(CATEGORIES.PINE_EDITOR_CLOSED, 'Could not open Pine Editor.');
 
   const escaped = JSON.stringify(source);
+  // READ BACK WHAT WE WROTE. setValue() returning without throwing proves
+  // nothing: when the finder resolved a DETACHED editor, every write "worked",
+  // compiled clean, reported Saved, and never reached the chart. The only
+  // honest confirmation is to read the buffer again and compare.
   const set = await evaluate(`
     (function() {
       var m = ${FIND_MONACO};
-      if (!m) return false;
+      if (!m) return { ok: false, why: 'no editor' };
       m.editor.setValue(${escaped});
-      return true;
+      var back = m.editor.getValue();
+      return { ok: true, lines: back.split('\\n').length, len: back.length };
     })()
   `);
 
-  if (!set) throw new ClassifiedError(CATEGORIES.API_UNEXPECTED, 'Monaco found but setValue() failed.');
-  return { success: true, lines_set: source.split('\n').length };
+  if (!set || !set.ok) {
+    throw new ClassifiedError(CATEGORIES.API_UNEXPECTED,
+      'Monaco found but setValue() failed' + (set && set.why ? ': ' + set.why : '.'));
+  }
+  const wantLines = source.split('\n').length;
+  if (set.len !== source.length || set.lines !== wantLines) {
+    throw new ClassifiedError(CATEGORIES.API_UNEXPECTED,
+      'Wrote ' + source.length + ' chars / ' + wantLines + ' lines but the editor ' +
+      'reads back ' + set.len + ' chars / ' + set.lines + ' lines. The write did ' +
+      'not land in the editor bound to the saved script.');
+  }
+  return { success: true, lines_set: wantLines, verified: true };
 }
 
 export async function compile() {
@@ -584,7 +633,39 @@ export async function save() {
 
   if (dialogHandled) await new Promise(r => setTimeout(r, 500));
 
-  return { success: true, action: dialogHandled ? 'saved_with_dialog' : 'Ctrl+S_dispatched' };
+  // DID IT ACTUALLY SAVE? Dispatching a keystroke and returning success:true
+  // told callers the script was saved when the chord had gone to a control that
+  // saves the CHART LAYOUT, or to an editor nothing was bound to. TradingView's
+  // Pine save button flips its label to "Saved" and disables itself once there
+  // is nothing outstanding, so that is the signal to read.
+  let saved = null;
+  for (let i = 0; i < 10; i++) {
+    saved = await evaluate(`
+      (function() {
+        var btns = document.querySelectorAll('button');
+        for (var i = 0; i < btns.length; i++) {
+          var b = btns[i];
+          if (b.offsetParent === null) continue;
+          var t = (b.textContent || '').trim();
+          if (/^Saved/i.test(t)) return true;
+          if (/^Save$/i.test(t) && !b.closest('[role="dialog"]')) return false;
+        }
+        return null;
+      })()
+    `);
+    if (saved !== null) break;
+    await new Promise(r => setTimeout(r, 200));
+  }
+
+  return {
+    success: true,
+    action: dialogHandled ? 'saved_with_dialog' : 'save_chord_dispatched',
+    // null means the button could not be located, which is NOT the same as
+    // saved. Callers that care must treat null as unknown, not as success.
+    saved: saved,
+    ...(saved === false ? { warning: 'The editor still reports unsaved changes.' } : {}),
+    ...(saved === null ? { warning: 'Could not find the Pine save button, so the save is UNVERIFIED.' } : {}),
+  };
 }
 
 export async function getConsole() {

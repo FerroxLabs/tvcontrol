@@ -14,3 +14,9 @@ ijfw/
 # Allow branding screenshots / capture guide (runtime tv screenshot output goes to /screenshots, which stays ignored)
 !assets/screenshots/
 !assets/screenshots/**
+
+# Scratch buffers pulled off the live editor by scripts/pine_pull.js.
+# These are whatever script happened to be open, which on this machine has
+# meant private strategy sources landing in a PUBLIC repo. Never commit them.
+scripts/current.pine
+scripts/*.pine
