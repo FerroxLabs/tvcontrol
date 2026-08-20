@@ -25,6 +25,7 @@ import { tmpdir } from 'node:os';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { listScripts } from '../src/core/pine.js';
+import { getStudyValues } from '../src/core/data.js';
 import { CATEGORIES } from '../src/errors.js';
 import { scriptedDeps } from './_helpers.js';
 
@@ -508,6 +509,56 @@ describe('importFrom replace mode and section headers', () => {
     assert.ok(!appendedHeaders.includes('###KEEP'), 'a header already present must not be appended again');
     assert.deepEqual(live.filter((x) => x === '###KEEP'), ['###KEEP'], 'exactly one KEEP header, not two');
     assert.equal(r.error_count, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getStudyValues: an empty chart and a broken read are not the same answer
+// ---------------------------------------------------------------------------
+
+describe('getStudyValues failure contract', () => {
+  // This fix was previously verified only by a string-grep asserting that
+  // getStudyValues appears in batch.js — which proves wiring, not behaviour.
+  // It matters because batch_run stamps success on whatever this returns, so a
+  // broken read becomes an all-green universe scan that read nothing.
+  const deps = (data) => ({ _deps: { evaluate: async () => data, evaluateAsync: async () => data } });
+
+  it('THROWS when indicators are on the chart but none yield values', async () => {
+    const { _deps } = deps({ seen: 3, results: [], empty: ['RSI', 'MACD'], failed: [] });
+    await assert.rejects(
+      () => getStudyValues({ _deps }),
+      (err) => {
+        assert.equal(err.category, CATEGORIES.TV_UI_CHANGED);
+        assert.match(err.message, /3 indicator/);
+        return true;
+      },
+    );
+  });
+
+  it('THROWS when the read itself returns nothing usable', async () => {
+    const { _deps } = deps(undefined);
+    await assert.rejects(
+      () => getStudyValues({ _deps }),
+      (err) => err.category === CATEGORIES.TV_UI_CHANGED,
+    );
+  });
+
+  it('reports a genuinely bare chart as an honest empty result', async () => {
+    // No indicators at all is a real answer, not a failure.
+    const { _deps } = deps({ seen: 0, results: [], empty: [], failed: [] });
+    const r = await getStudyValues({ _deps });
+    assert.equal(r.success, true);
+    assert.equal(r.count, 0);
+    assert.equal(r.studies_on_chart, 0);
+  });
+
+  it('returns the values it found and says how many studies it saw', async () => {
+    const { _deps } = deps({ seen: 2, results: [{ entity_id: 'a', name: 'RSI', inputs: [], values: { RSI: 61 } }], empty: ['Volume'], failed: [] });
+    const r = await getStudyValues({ _deps });
+    assert.equal(r.success, true);
+    assert.equal(r.count, 1);
+    assert.equal(r.studies_on_chart, 2, 'the gap between seen and returned is the signal');
+    assert.deepEqual(r.no_values, ['Volume']);
   });
 });
 

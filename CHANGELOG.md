@@ -159,7 +159,22 @@ been reintroduced in the post-delete path with the whole suite still green. The
 mock can now fail from the Nth read onward, and the replacement test was
 confirmed to fail against that exact mutation.
 
-580 offline tests.
+Two follow-ups the review asked for on the way to passing:
+
+- **`data_get_study_values` had no behavioural test.** Its fix was verified only
+  by a string-grep asserting the function appears in `batch.js`, which proves
+  wiring and not behaviour. It matters more than most: `batch_run` stamps
+  success on whatever this returns, so a broken read becomes an all-green scan
+  that read nothing. Four behavioural cases now cover a broken read, a chart
+  with indicators that yield nothing, a genuinely bare chart, and a normal read.
+- **The alert resolution check claimed to be a whitelist and was not.** The
+  pattern accepts any 1-to-4-digit minute count, deliberately, because
+  TradingView supports resolutions this probe did not enumerate and rejecting a
+  legitimate one is worse than forwarding it. It fails closed — an unsupported
+  value comes back `invalid_request` and `create()` throws — so the comment now
+  says it is a shape check rather than the authority on what is accepted.
+
+584 offline tests.
 
 ## [2.2.5] - 2026-08-20
 

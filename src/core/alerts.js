@@ -32,9 +32,18 @@ const CONDITION_TYPES = {
 //   on_first_fire   fires once, then deactivates
 //   on_bar_close    fires each time a bar closes with the condition true
 const FREQUENCIES = new Set(['on_first_fire', 'on_bar_close']);
-// Resolutions, also verified live: bare minute counts (1, 5, 15, 30, 60, 120,
-// 240) and D, W, M, with or without a leading count (1D and D both work).
-const RESOLUTION_RE = /^(1|3|5|10|15|30|45|60|120|180|240|[1-9][0-9]{0,3}|[DWM]|[1-9][0-9]?[DWM])$/;
+// Resolutions. VERIFIED LIVE: 1, 5, 15, 30, 60, 120, 240, D, W, M, 1D, 1W, 1M.
+// The pattern is deliberately WIDER than that list — any 1-to-4-digit minute
+// count passes — because TradingView supports resolutions this probe did not
+// enumerate (2, 3, 10, 45, 90 and so on) and rejecting a legitimate one is a
+// worse failure than forwarding it.
+//
+// This is a SHAPE check, not a whitelist, and the distinction matters: an
+// unsupported value reaches the API, comes back invalid_request, and create()
+// throws. It fails closed, so nothing false is ever reported as success. The
+// check exists to catch "banana" before it costs a round trip, not to be the
+// authority on what TradingView accepts.
+const RESOLUTION_RE = /^([1-9][0-9]{0,3}|[DWM]|[1-9][0-9]?[DWM])$/;
 
 export async function create({ condition = 'crossing', price, message, mobile_push = true, expiration_days = 30, frequency = 'on_first_fire', resolution = '1', _deps } = {}) {
   const { evaluateAsync } = _resolve(_deps);
