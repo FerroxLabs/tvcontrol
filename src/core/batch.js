@@ -9,7 +9,7 @@
 import { getClient } from '../connection.js';
 import { waitForChartReady } from '../wait.js';
 import * as chart from './chart.js';
-import { getOhlcv, getStrategyResults } from './data.js';
+import { getOhlcv, getStrategyResults, getStudyValues } from './data.js';
 import { writeFileSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -18,7 +18,7 @@ import { ClassifiedError, CATEGORIES } from '../errors.js';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SCREENSHOT_DIR = join(dirname(dirname(__dirname)), 'screenshots');
 
-const VALID_ACTIONS = new Set(['screenshot', 'get_ohlcv', 'get_strategy_results']);
+const VALID_ACTIONS = new Set(['screenshot', 'get_ohlcv', 'get_strategy_results', 'get_study_values']);
 
 async function _captureScreenshot(symbol, tf) {
   mkdirSync(SCREENSHOT_DIR, { recursive: true });
@@ -39,6 +39,7 @@ function _resolve(deps) {
     waitForChartReady: deps?.waitForChartReady || waitForChartReady,
     getOhlcv: deps?.getOhlcv || getOhlcv,
     getStrategyResults: deps?.getStrategyResults || getStrategyResults,
+    getStudyValues: deps?.getStudyValues || getStudyValues,
     captureScreenshot: deps?.captureScreenshot || _captureScreenshot,
     sleep: deps?.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
   };
@@ -100,6 +101,15 @@ export async function batchRun({ symbols, timeframes, action, delay_ms, ohlcv_co
             actionResult = await deps.getOhlcv({ count: ohlcv_count, summary: true, _deps });
           } else if (action === 'get_strategy_results') {
             actionResult = await deps.getStrategyResults({ entity_id, _deps });
+          } else if (action === 'get_study_values') {
+            // THIS ACTION WAS DOCUMENTED BUT NEVER IMPLEMENTED. The server's
+            // own tool guide and the market-open scan skill both instruct
+            // callers to run batch_run({action:"get_study_values"}) to sweep a
+            // universe in one call — it is the core step of that workflow. The
+            // enum did not contain it, so every such call died at schema
+            // validation and the documented flagship scan was impossible.
+            // Found by sweeping all 101 tools on 2026-08-20.
+            actionResult = await deps.getStudyValues({ _deps });
           }
           results.push({ ...combo, success: true, result: actionResult });
         } catch (err) {

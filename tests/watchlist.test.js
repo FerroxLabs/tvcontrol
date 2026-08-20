@@ -27,13 +27,28 @@ after(() => {
 // ---------------------------------------------------------------------------
 
 describe('remove()', () => {
+  // The DOM context-menu contract these tests used to assert is GONE. It was
+  // measured broken against a live account on 2026-08-20: remove reported a
+  // click and the symbol stayed. watchlist is now built on TradingView's
+  // symbols_list REST API, so the contract is: read the list, POST the
+  // mutation, read the list AGAIN, and report what the second read proves.
+  //
+  // removeBulk makes exactly three evaluateAsync calls, which is what the
+  // sequences below supply:
+  //   1. GET  active/           list before
+  //   2. POST custom/<id>/remove/
+  //   3. GET  active/           list after, for verification
+
   it('rejects empty symbol', async () => {
     const { _deps } = emptyDeps();
     await assert.rejects(
       () => remove({ symbol: '', _deps }),
       (err) => {
         assert.ok(err instanceof ClassifiedError);
-        assert.equal(err.category, CATEGORIES.API_UNEXPECTED);
+        // INVALID_ARGUMENT, not API_UNEXPECTED: an empty symbol is a caller
+        // error, and classifying it as an API fault sent people looking at
+        // TradingView instead of their own call.
+        assert.equal(err.category, CATEGORIES.INVALID_ARGUMENT);
         return true;
       },
     );
@@ -45,57 +60,58 @@ describe('remove()', () => {
       () => remove({ symbol: null, _deps }),
       (err) => {
         assert.ok(err instanceof ClassifiedError);
-        assert.equal(err.category, CATEGORIES.API_UNEXPECTED);
+        assert.equal(err.category, CATEGORIES.INVALID_ARGUMENT);
         return true;
       },
     );
   });
 
-  it('happy path — resolve + context-menu + post-remove verify', async () => {
-    // Sequence under the new contract:
-    //   1. _resolveStoredSymbol preflight (user input AAPL → stored AAPL)
-    //   2. contextmenu dispatch on the row
-    //   3. Remove menu item click
-    //   4. _resolveStoredSymbol post-verify (symbol is gone)
+  it('happy path — the second read proves the symbol is gone', async () => {
     const { _deps, evaluate } = scriptedDeps({}, [
-      { match: 'exact', symbolFull: 'AAPL' }, // resolve-before: found
-      { found: true, dispatched: true },       // contextmenu
-      { clicked: true },                        // Remove click
-      { match: null },                          // resolve-after: gone
+      { ok: true, id: 42, name: 'Test', symbols: ['NASDAQ:AAPL', 'NASDAQ:MSFT'] },
+      { ok: true, status: 200 },
+      { ok: true, id: 42, name: 'Test', symbols: ['NASDAQ:MSFT'] },
     ]);
-    const result = await remove({ symbol: 'AAPL', _deps });
+    const result = await remove({ symbol: 'NASDAQ:AAPL', _deps });
     assert.equal(result.success, true);
-    assert.equal(result.action, 'removed');
-    assert.equal(result.requested_symbol, 'AAPL');
-    assert.equal(result.stored_symbol, 'AAPL');
-    assert.equal(result.method, 'context_menu');
-    assert.ok(evaluate.calls.some(c => c.includes('AAPL')));
+    assert.equal(result.verified, true);
+    assert.equal(result.symbol, 'NASDAQ:AAPL');
+    assert.equal(result.count, 1);
+    assert.ok(evaluate.calls.some((c) => c.includes('remove')));
   });
 
-  it('fuzzy match — bare ticker resolves to exchange-prefixed stored form', async () => {
+  it('SILENT-SUCCESS GUARD — the API says ok but the symbol is still there', async () => {
+    // This is the exact failure that shipped in 2.2.3, now caught by the
+    // second read instead of being reported as success.
     const { _deps } = scriptedDeps({}, [
-      { match: 'fuzzy', symbolFull: 'NASDAQ:AAPL' }, // resolve-before
-      { found: true, dispatched: true },
-      { clicked: true },
-      { match: null },                                // resolve-after
+      { ok: true, id: 42, name: 'Test', symbols: ['NASDAQ:AAPL'] },
+      { ok: true, status: 200 },
+      { ok: true, id: 42, name: 'Test', symbols: ['NASDAQ:AAPL'] },
     ]);
-    const result = await remove({ symbol: 'AAPL', _deps });
-    assert.equal(result.success, true);
-    assert.equal(result.requested_symbol, 'AAPL');
-    assert.equal(result.stored_symbol, 'NASDAQ:AAPL');
+    const result = await remove({ symbol: 'NASDAQ:AAPL', _deps });
+    assert.equal(result.success, false, 'a removal that did not happen must not report success');
+    assert.equal(result.verified, false);
   });
 
-  it('silent-success guard — throws when click reported but symbol still present', async () => {
+  it('symbol not in the list throws SYMBOL_UNKNOWN rather than silently passing', async () => {
     const { _deps } = scriptedDeps({}, [
-      { match: 'exact', symbolFull: 'AAPL' },     // resolve-before
-      { found: true, dispatched: true },           // menu opened
-      { clicked: true },                            // click reported success
-      { match: 'exact', symbolFull: 'AAPL' },     // resolve-after: STILL THERE
+      { ok: true, id: 42, name: 'Test', symbols: ['NASDAQ:MSFT'] },
+      { ok: true, id: 42, name: 'Test', symbols: ['NASDAQ:MSFT'] },
     ]);
     await assert.rejects(
-      remove({ symbol: 'AAPL', _deps }),
-      (err) => err.category === 'api_unexpected' && /still in the watchlist/i.test(err.message),
+      () => remove({ symbol: 'NASDAQ:AAPL', _deps }),
+      (err) => err.category === CATEGORIES.SYMBOL_UNKNOWN,
     );
+  });
+
+  it('section headers are not counted as symbols', async () => {
+    const { _deps } = scriptedDeps({}, [
+      { ok: true, id: 42, name: 'T', symbols: ['###CORE BASKET', 'NASDAQ:AAPL', 'NASDAQ:MSFT'] },
+      { ok: true, status: 200 },
+      { ok: true, id: 42, name: 'T', symbols: ['###CORE BASKET', 'NASDAQ:MSFT'] },
+    ]);
+    const result = await remove({ symbol: 'NASDAQ:AAPL', _deps });
+    assert.equal(result.count, 1, '### entries are list furniture, not tradable symbols');
   });
 });
 
@@ -106,10 +122,13 @@ describe('remove()', () => {
 describe('exportTo()', () => {
   it('writes JSON to a tmp path', async () => {
     const filePath = join(TMP, 'export-test.json');
-    const { _deps } = scriptedDeps({}, [
-      { opened: false, ready: true },
-      { symbols: [{ symbol: 'AAPL' }, { symbol: 'MSFT' }], source: 'data_attributes' },
-    ]);
+    // get() now sources membership from the symbols_list API. Keyed by
+    // substring so the DOM price-enrichment calls (which are best-effort and
+    // may not fire at all) cannot shift a positional sequence.
+    const { _deps } = scriptedDeps({
+      "active/": { ok: true, id: 42, name: 'Test', symbols: ['AAPL', 'MSFT'] },
+      'data-symbol-full': {},
+    });
     const result = await exportTo({ file_path: filePath, _deps });
     assert.equal(result.success, true);
     assert.equal(result.file_path, filePath);
@@ -200,19 +219,20 @@ describe('importFrom()', () => {
       symbols: [{ symbol: 'AAPL' }, { symbol: 'TSLA' }],
     }));
 
-    // get() returns AAPL already present
-    const { _deps, evaluate } = scriptedDeps({}, [
-      { opened: false, ready: true },
-      { symbols: [{ symbol: 'AAPL' }], source: 'data_attributes' },
-    ]);
+    // get() reports AAPL already present, from the API
+    const { _deps, evaluate } = scriptedDeps({
+      "active/": { ok: true, id: 42, name: 'Test', symbols: ['AAPL'] },
+      'data-symbol-full': {},
+    });
 
     const result = await importFrom({ file_path: file, dry_run: true, _deps });
     assert.equal(result.success, true);
     assert.equal(result.dry_run, true);
     assert.deepEqual(result.would_add, ['TSLA']);
     assert.deepEqual(result.would_skip, ['AAPL']);
-    // No mutation calls beyond readiness + get().
-    assert.equal(evaluate.calls.length, 2);
+    // A dry run must not mutate anything: no append/remove POST is issued.
+    assert.ok(!evaluate.calls.some((c) => /custom\/.*\/(append|remove)/.test(c)),
+      'dry_run issued a mutation call');
   });
 
   it('mode=merge adds symbols not already present', async () => {
@@ -223,25 +243,24 @@ describe('importFrom()', () => {
       symbols: [{ symbol: 'AAPL' }, { symbol: 'NVDA' }],
     }));
 
-    // Sequence:
-    //   call 0 — get() for current list → AAPL already present
-    //   call 1..N — add() panel check for NVDA
-    //   add() also calls getClient() — mock that via _deps
-    const mockClient = {
-      Input: {
-        insertText: async () => {},
-        dispatchKeyEvent: async () => {},
+    // add() no longer types into a panel — it POSTs to the append endpoint and
+    // then re-reads to confirm. The list therefore has to GROW between the two
+    // reads, which is what makes this a real test of the verification rather
+    // than of the mock.
+    let listReads = 0;
+    const { _deps } = scriptedDeps({
+      "active/": () => {
+        listReads += 1;
+        // read 1: importFrom's get()      -> AAPL only
+        // read 2: addBulk's before-read   -> AAPL only
+        // read 3: addBulk's verify-read   -> AAPL + NVDA
+        return listReads >= 3
+          ? { ok: true, id: 42, name: 'Test', symbols: ['AAPL', 'NVDA'] }
+          : { ok: true, id: 42, name: 'Test', symbols: ['AAPL'] };
       },
-    };
-    const { _deps, evaluate } = scriptedDeps({}, [
-      { opened: false, ready: true },
-      { symbols: [{ symbol: 'AAPL' }], source: 'data_attributes' }, // get() — AAPL already present
-      { opened: false, ready: true }, // add() watchlist readiness
-      [],                     // add() before-set (empty from evaluate's perspective)
-      { found: true },        // add() addClicked
-      ['NVDA'],               // add() after-set — NVDA was added
-    ]);
-    _deps.getClient = async () => mockClient;
+      'append': { ok: true, status: 200 },
+      'data-symbol-full': {},
+    });
 
     const result = await importFrom({ file_path: file, mode: 'merge', _deps });
     assert.equal(result.success, true);

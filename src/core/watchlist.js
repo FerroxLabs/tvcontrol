@@ -12,6 +12,7 @@ import { parseJsonSafe } from './_json.js';
 function _resolve(deps) {
   return {
     evaluate: deps?.evaluate || _evaluate,
+    evaluateAsync: deps?.evaluateAsync || _evaluateAsync,
     getClient: deps?.getClient || _getClient,
     wait: deps?.wait || ((ms) => new Promise((r) => setTimeout(r, ms))),
   };
@@ -60,61 +61,120 @@ async function _ensureWatchlistOpen(evaluate, wait, maxWaitMs = 5000) {
   });
 }
 
-export async function get({ _deps } = {}) {
-  const { evaluate, wait } = _resolve(_deps);
-  await _ensureWatchlistOpen(evaluate, wait);
-  const symbols = await evaluate(`
-    (function() {
-      function norm(t) { return String(t || '').replace(/\\u2212/g, '-').trim(); }
-      var results = [];
-      var seen = {};
-      var container = document.querySelector('[class*="layout__area--right"]');
-      if (!container) return { symbols: [], source: 'no_container' };
+// ---------------------------------------------------------------------------
+// THE WATCHLIST API. Everything below used to be DOM automation: click the add
+// button, right-click a row and hunt for "Remove" in a context menu. That is
+// why watchlist_remove was broken in 2.2.3 — it reported a click and the symbol
+// stayed put. Worse, the DOM read disagreed with reality: watchlist_get said
+// TSLA/NVDA/AMD were absent while the account actually held all three, because
+// the DOM only contains rendered rows.
+//
+// TradingView has a real authenticated REST API for this. Discovered and
+// verified against a live account on 2026-08-20:
+//
+//   GET  /api/v1/symbols_list/active/              the active list {id,name,symbols[]}
+//   GET  /api/v1/symbols_list/custom/              every custom list
+//   POST /api/v1/symbols_list/custom/<id>/append/  body ["NASDAQ:TSLA"] -> full list
+//   POST /api/v1/symbols_list/custom/<id>/remove/  body ["NASDAQ:TSLA"] -> full list
+//
+// The body must be a JSON ARRAY. A query string or an object returns 422 with
+// {"non_field_errors":["Expected a list of items but got type \"dict\"."]}.
+// Both mutations return the updated list, but we still re-read: a response
+// describing the action is the action reporting on itself.
+const WL_API = 'https://www.tradingview.com/api/v1/symbols_list/';
 
-      // Find all elements with symbol data attributes
-      var symbolEls = container.querySelectorAll('[data-symbol-full]');
-      for (var i = 0; i < symbolEls.length; i++) {
-        var sym = symbolEls[i].getAttribute('data-symbol-full');
-        if (!sym || seen[sym]) continue;
-        seen[sym] = true;
+// Section headers are real entries in the stored list. They start with ### and
+// are not tradable symbols, so membership counts must exclude them.
+function _isHeader(s) { return String(s).startsWith('###'); }
 
-        // Find the row and extract price data
-        var row = symbolEls[i].closest('[class*="row"]') || symbolEls[i].parentElement;
-        var cells = row ? row.querySelectorAll('[class*="cell"], [class*="column"]') : [];
-        var texts = [];
-        for (var j = 0; j < cells.length; j++) {
-          texts.push(norm(cells[j].textContent));
-        }
-        results.push({
-          symbol: sym,
-          last: texts[1] || null,
-          change: texts[2] || null,
-          change_percent: texts[3] || null,
-          volume: texts[4] || null,
-        });
-      }
-
-      if (results.length > 0) return { symbols: results, source: 'dom_rows' };
-
-      // Method 3: Scan for ticker-like text in the right panel
-      var items = container.querySelectorAll('[class*="symbolName"], [class*="tickerName"], [class*="symbol-"]');
-      for (var k = 0; k < items.length; k++) {
-        var text = items[k].textContent.trim();
-        if (text && /^[A-Z][A-Z0-9.:!]{0,20}$/.test(text) && !seen[text]) {
-          seen[text] = true;
-          results.push({ symbol: text, last: null, change: null, change_percent: null });
-        }
-      }
-
-      return { symbols: results, source: results.length > 0 ? 'text_scan' : 'empty' };
+async function _apiActive(evaluateAsync) {
+  const r = await evaluateAsync(`
+    (async function(){
+      try {
+        var res = await fetch(${JSON.stringify(WL_API)} + 'active/', { credentials: 'include' });
+        if (!res.ok) return { ok: false, status: res.status };
+        var j = await res.json();
+        return { ok: true, id: j.id, name: j.name, symbols: j.symbols || [] };
+      } catch (e) { return { ok: false, error: e.message }; }
     })()
   `);
+  if (!r || !r.ok) {
+    throw new ClassifiedError(
+      CATEGORIES.API_UNEXPECTED,
+      `Could not read the active watchlist (${r && r.status ? 'status ' + r.status : (r && r.error) || 'unknown'})`,
+      { hint: 'Confirm you are logged in to TradingView in the attached session.' },
+    );
+  }
+  return r;
+}
+
+async function _apiMutate(evaluateAsync, listId, verb, symbols) {
+  const r = await evaluateAsync(`
+    (async function(){
+      try {
+        var res = await fetch(${JSON.stringify(WL_API)} + 'custom/' + ${JSON.stringify(String(listId))} + '/' + ${JSON.stringify(verb)} + '/', {
+          method: 'POST', credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(${JSON.stringify(symbols)})
+        });
+        var text = await res.text();
+        return { ok: res.ok, status: res.status, raw: text.slice(0, 200) };
+      } catch (e) { return { ok: false, error: e.message }; }
+    })()
+  `);
+  if (!r || !r.ok) {
+    throw new ClassifiedError(
+      CATEGORIES.API_UNEXPECTED,
+      `Watchlist ${verb} failed (status ${(r && r.status) || '?'}): ${(r && (r.raw || r.error)) || 'unknown'}`,
+    );
+  }
+  return r;
+}
+
+export async function get({ _deps } = {}) {
+  const { evaluate, evaluateAsync, wait } = _resolve(_deps);
+
+  // MEMBERSHIP COMES FROM THE API, NOT THE DOM. The DOM only holds rendered
+  // rows, so a long or scrolled list reports symbols as absent that the account
+  // actually holds. Measured 2026-08-20: it claimed TSLA/NVDA/AMD were gone
+  // while all three were in the stored list.
+  const api = await _apiActive(evaluateAsync);
+  const symbols = api.symbols.filter((x) => !_isHeader(x));
+  const sections = api.symbols.filter((x) => _isHeader(x));
+
+  // Prices only exist in the rendered widget. Best effort: enrich if the panel
+  // is open, otherwise return membership without quotes rather than failing.
+  let quotes = {};
+  try {
+    await _ensureWatchlistOpen(evaluate, wait);
+    const rows = await evaluate(`
+      (function() {
+        function norm(t) { return String(t || '').replace(/−/g, '-').trim(); }
+        var out = {};
+        var nodes = document.querySelectorAll('[data-symbol-full]');
+        for (var i = 0; i < nodes.length; i++) {
+          var full = nodes[i].getAttribute('data-symbol-full');
+          if (!full || out[full]) continue;
+          var cells = nodes[i].querySelectorAll('[class*="cell"]');
+          var vals = [];
+          for (var c = 0; c < cells.length; c++) vals.push(norm(cells[c].textContent));
+          out[full] = vals;
+        }
+        return out;
+      })()
+    `);
+    if (rows && typeof rows === 'object') quotes = rows;
+  } catch { /* panel closed or layout changed; membership still stands */ }
 
   return {
     success: true,
-    count: symbols?.symbols?.length || 0,
-    source: symbols?.source || 'unknown',
-    symbols: symbols?.symbols || [],
+    watchlist: api.name,
+    watchlist_id: api.id,
+    count: symbols.length,
+    symbols: symbols.map((sym) => (quotes[sym] && quotes[sym].length ? { symbol: sym, cells: quotes[sym] } : { symbol: sym })),
+    sections,
+    quotes_available: Object.keys(quotes).length > 0,
+    source: 'symbols_list_api',
   };
 }
 
@@ -165,219 +225,98 @@ async function _currentSymbolsSet(evaluate) {
 }
 
 export async function add({ symbol, _deps }) {
-  const { evaluate, getClient, wait } = _resolve(_deps);
-  const c = await getClient();
-  await _ensureWatchlistOpen(evaluate, wait);
-
-  const before = await _currentSymbolsSet(evaluate);
-
-  // Click the "Add symbol" button (various selectors)
-  const addClicked = await evaluate(`
-    (function() {
-      var selectors = [
-        '[data-name="add-symbol-button"]',
-        '[aria-label="Add symbol"]',
-        '[aria-label*="Add symbol"]',
-        'button[class*="addSymbol"]',
-      ];
-      for (var s = 0; s < selectors.length; s++) {
-        var btn = document.querySelector(selectors[s]);
-        if (btn && btn.offsetParent !== null) { btn.click(); return { found: true, selector: selectors[s] }; }
-      }
-      // Fallback: find + button in right panel
-      var container = document.querySelector('[class*="layout__area--right"]');
-      if (container) {
-        var buttons = container.querySelectorAll('button');
-        for (var i = 0; i < buttons.length; i++) {
-          var ariaLabel = buttons[i].getAttribute('aria-label') || '';
-          if (/add.*symbol/i.test(ariaLabel) || buttons[i].textContent.trim() === '+') {
-            buttons[i].click();
-            return { found: true, method: 'fallback' };
-          }
-        }
-      }
-      return { found: false };
-    })()
-  `);
-
-  if (!addClicked?.found) {
-    throw new ClassifiedError(
-      CATEGORIES.TV_UI_CHANGED,
-      'Add symbol button not found in watchlist panel',
-      { hint: 'TradingView UI may have changed. Try opening the watchlist panel manually first.' },
-    );
+  if (!symbol || typeof symbol !== 'string') {
+    throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'symbol must be a non-empty string');
   }
-  await new Promise(r => setTimeout(r, 300));
-
-  await c.Input.insertText({ text: symbol });
-  await new Promise(r => setTimeout(r, 500));
-
-  await c.Input.dispatchKeyEvent({ type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
-  await c.Input.dispatchKeyEvent({ type: 'keyUp', key: 'Enter', code: 'Enter' });
-  await new Promise(r => setTimeout(r, 400));
-
-  await c.Input.dispatchKeyEvent({ type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
-  await c.Input.dispatchKeyEvent({ type: 'keyUp', key: 'Escape', code: 'Escape' });
-  await new Promise(r => setTimeout(r, 300));
-
-  // Verify: at least one new symbol appeared, AND one of them resolves from
-  // the user's input. TradingView expands bare tickers (AAPL → NASDAQ:AAPL),
-  // so trust the diff rather than assuming the input string is what got stored.
-  // Poll (≤3s) instead of trusting a single fixed-delay snapshot — slow
-  // autocomplete / network latency previously produced a false SYMBOL_UNKNOWN
-  // even when the add succeeded a beat later.
-  let added = [];
-  for (let attempt = 0; attempt < 12; attempt++) {
-    const after = await _currentSymbolsSet(evaluate);
-    added = [...after].filter((s) => !before.has(s));
-    if (added.length > 0) break;
-    await new Promise(r => setTimeout(r, 250));
-  }
-  if (added.length === 0) {
-    throw new ClassifiedError(
-      CATEGORIES.SYMBOL_UNKNOWN,
-      `Add reported click but watchlist unchanged for "${symbol}". TradingView likely rejected it (ambiguous, wrong exchange, or not found).`,
-      { hint: 'Try prefixing with an exchange (e.g., NASDAQ:AAPL, BINANCE:BTCUSDT) and retry.' },
-    );
-  }
-  return { success: true, action: 'added', requested_symbol: symbol, stored_symbol: added[0], added_count: added.length };
+  const res = await addBulk({ symbols: [symbol], _deps });
+  const one = res.results && res.results[0];
+  return {
+    success: res.success,
+    symbol: (one && one.symbol) || symbol,
+    already_present: (one && one.already_present) || false,
+    watchlist: res.watchlist,
+    count: res.count,
+    verified: res.verified,
+  };
 }
 
 export async function addBulk({ symbols, _deps }) {
   if (!Array.isArray(symbols) || symbols.length === 0) {
     throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'symbols must be a non-empty array');
   }
-  const added = [];
-  const errors = [];
-  for (const symbol of [...new Set(symbols.map((value) => String(value).trim()).filter(Boolean))]) {
-    try {
-      const result = await add({ symbol, _deps });
-      added.push({ symbol, stored_symbol: result.stored_symbol });
-    } catch (error) {
-      errors.push({ symbol, error: error.message, category: error.category || CATEGORIES.API_UNEXPECTED });
-    }
-  }
+  const { evaluateAsync } = _resolve(_deps);
+  const before = await _apiActive(evaluateAsync);
+  const had = new Set(before.symbols.map(String));
+  const wanted = symbols.map((x) => String(x).trim()).filter(Boolean);
+  const missing = wanted.filter((x) => !had.has(x));
+
+  if (missing.length) await _apiMutate(evaluateAsync, before.id, 'append', missing);
+
+  // VERIFY from a fresh read, not from the mutation's own response.
+  const after = await _apiActive(evaluateAsync);
+  const now = new Set(after.symbols.map(String));
+  const results = wanted.map((x) => ({ symbol: x, added: now.has(x), already_present: had.has(x) }));
+  const allThere = results.every((r) => r.added);
   return {
-    success: errors.length === 0,
-    requested_count: symbols.length,
-    added_count: added.length,
-    error_count: errors.length,
-    added,
-    errors,
+    success: allThere,
+    watchlist: after.name,
+    watchlist_id: after.id,
+    count: after.symbols.filter((x) => !_isHeader(x)).length,
+    added_count: results.filter((r) => r.added && !r.already_present).length,
+    results,
+    verified: allThere,
+    source: 'symbols_list_api',
   };
 }
 
 export async function remove({ symbol, _deps }) {
   if (!symbol || typeof symbol !== 'string') {
-    throw new ClassifiedError(CATEGORIES.API_UNEXPECTED, 'symbol must be a non-empty string');
+    throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'symbol must be a non-empty string');
   }
-  const { evaluate, getClient } = _resolve(_deps);
-
-  // Resolve the user-supplied symbol against the stored exchange-prefixed
-  // form. Bare "AAPL" → stored "NASDAQ:AAPL"; we need the stored string for
-  // the data-symbol-full CSS selector to match.
-  const resolved = await _resolveStoredSymbol(evaluate, symbol);
-  if (!resolved) {
+  const res = await removeBulk({ symbols: [symbol], _deps });
+  const one = res.results && res.results[0];
+  if (one && one.removed === false && one.was_present === false) {
     throw new ClassifiedError(
       CATEGORIES.SYMBOL_UNKNOWN,
       `Symbol not found in watchlist: ${symbol}`,
-      { hint: 'Call watchlist_get first to see exact stored symbol names (they may be exchange-prefixed).' },
+      { hint: 'Call watchlist_get for exact stored names; they are exchange-prefixed (e.g. NASDAQ:TSLA).' },
     );
   }
-  const rowSelector = `[data-symbol-full=${JSON.stringify(resolved)}]`;
-
-  // Try context-menu approach: right-click the row, click Remove.
-  const menuResult = await evaluate(`
-    (function() {
-      var row = document.querySelector(${safeString(rowSelector)});
-      if (!row) return { found: false };
-      var evt = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2 });
-      row.dispatchEvent(evt);
-      return { found: true, dispatched: true };
-    })()
-  `);
-
-  let method = null;
-  if (menuResult?.found) {
-    await new Promise(r => setTimeout(r, 300));
-    const removeClicked = await evaluate(`
-      (function() {
-        var items = document.querySelectorAll('[role="menuitem"], [data-name*="remove"], [class*="menuItem"]');
-        for (var i = 0; i < items.length; i++) {
-          var text = items[i].textContent.trim().toLowerCase();
-          if (text === 'remove' || text === 'delete' || text === 'remove from watchlist') {
-            items[i].click();
-            return { clicked: true };
-          }
-        }
-        return { clicked: false };
-      })()
-    `);
-    if (removeClicked?.clicked) method = 'context_menu';
-  }
-
-  // Keyboard fallback: focus the row and press Delete.
-  if (!method) {
-    const focusResult = await evaluate(`
-      (function() {
-        var row = document.querySelector(${safeString(rowSelector)});
-        if (!row) return { found: false };
-        row.focus();
-        return { found: true };
-      })()
-    `);
-    if (focusResult?.found) {
-      const c = await getClient();
-      await c.Input.dispatchKeyEvent({ type: 'keyDown', key: 'Delete', code: 'Delete', windowsVirtualKeyCode: 46 });
-      await c.Input.dispatchKeyEvent({ type: 'keyUp', key: 'Delete', code: 'Delete', windowsVirtualKeyCode: 46 });
-      method = 'keyboard';
-    }
-  }
-
-  // Verify the symbol is actually gone. Previously both paths returned
-  // success:true without checking — a right-click that missed or a Delete
-  // keypress swallowed by a focused sibling silently reported success.
-  await new Promise(r => setTimeout(r, 300));
-  const stillThere = await _resolveStoredSymbol(evaluate, resolved);
-  if (stillThere) {
-    throw new ClassifiedError(
-      CATEGORIES.API_UNEXPECTED,
-      `Remove reported a click but "${resolved}" is still in the watchlist`,
-      { hint: 'The TradingView watchlist UI may have changed; try removing manually and filing an issue with the stored symbol name.' },
-    );
-  }
-  if (!method) {
-    // Row was present during resolve but we couldn't open the menu or focus it.
-    throw new ClassifiedError(
-      CATEGORIES.TV_UI_CHANGED,
-      `Found "${resolved}" in watchlist but couldn't dispatch the remove action`,
-      { hint: 'The watchlist row selector may have changed. Try right-clicking the symbol manually and choosing Remove.' },
-    );
-  }
-  return { success: true, action: 'removed', requested_symbol: symbol, stored_symbol: resolved, method };
+  return {
+    success: res.success,
+    symbol: (one && one.symbol) || symbol,
+    watchlist: res.watchlist,
+    count: res.count,
+    verified: res.verified,
+  };
 }
 
 export async function removeBulk({ symbols, _deps }) {
   if (!Array.isArray(symbols) || symbols.length === 0) {
     throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'symbols must be a non-empty array');
   }
-  const removed = [];
-  const errors = [];
-  for (const symbol of [...new Set(symbols.map((value) => String(value).trim()).filter(Boolean))]) {
-    try {
-      const result = await remove({ symbol, _deps });
-      removed.push({ symbol, stored_symbol: result.stored_symbol, method: result.method });
-    } catch (error) {
-      errors.push({ symbol, error: error.message, category: error.category || CATEGORIES.API_UNEXPECTED });
-    }
-  }
+  const { evaluateAsync } = _resolve(_deps);
+  const before = await _apiActive(evaluateAsync);
+  const had = new Set(before.symbols.map(String));
+  const wanted = symbols.map((x) => String(x).trim()).filter(Boolean);
+  const present = wanted.filter((x) => had.has(x));
+
+  if (present.length) await _apiMutate(evaluateAsync, before.id, 'remove', present);
+
+  const after = await _apiActive(evaluateAsync);
+  const now = new Set(after.symbols.map(String));
+  const results = wanted.map((x) => ({ symbol: x, was_present: had.has(x), removed: had.has(x) && !now.has(x) }));
+  const ok = results.every((r) => !r.was_present || r.removed);
   return {
-    success: errors.length === 0,
-    requested_count: symbols.length,
-    removed_count: removed.length,
-    error_count: errors.length,
-    removed,
-    errors,
+    success: ok,
+    watchlist: after.name,
+    watchlist_id: after.id,
+    count: after.symbols.filter((x) => !_isHeader(x)).length,
+    removed_count: results.filter((r) => r.removed).length,
+    not_found: results.filter((r) => !r.was_present).map((r) => r.symbol),
+    results,
+    verified: ok,
+    source: 'symbols_list_api',
   };
 }
 

