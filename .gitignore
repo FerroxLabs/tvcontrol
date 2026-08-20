@@ -20,3 +20,6 @@ ijfw/
 # meant private strategy sources landing in a PUBLIC repo. Never commit them.
 scripts/current.pine
 scripts/*.pine
+
+# npm pack output
+*.tgz
