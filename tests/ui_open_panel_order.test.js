@@ -3,11 +3,17 @@
 //
 // THE BUG WAS ORDER, NOT MECHANISM. openPanel tried
 // bottomWidgetBar.activateScriptEditorTab() first and clicked
-// [data-name="pine-dialog-button"] only as a fallback. Measured on TradingView
-// Desktop 3.3.0:
+// [data-name="pine-dialog-button"] only as a fallback.
 //
-//   widget bar first, then the click  ->  editor never opened, 0 for 1
-//   the dialog button on its own      ->  opened immediately, 9 for 9
+// MEASURED across three live environments, same 9-transition cycle:
+//
+//   macOS   + Desktop 3.3.0   old order FAILS   new order 9/9
+//   Windows + Desktop 3.3.0   old order works   new order 9/9
+//   Windows + Chrome web      old order works   new order 9/9
+//
+// The failure is macOS-specific. That is exactly why this test exists: on
+// Windows the old order looks correct, so nothing on that platform would stop
+// someone reverting it and silently breaking every Mac user.
 //
 // bottomWidgetBar exists on this build and its methods do not throw. They just
 // leave the editor shut and apparently leave TradingView believing the editor
