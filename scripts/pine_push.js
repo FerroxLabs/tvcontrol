@@ -1,5 +1,20 @@
 #!/usr/bin/env node
 // Push scripts/current.pine → TradingView editor, then compile
+//
+// TWO SELECTOR BUGS, both found on 2026-08-20, both silent.
+//
+// SECOND AND WORSE: monacoEnv.editor.getEditors() returns THREE editors, and
+// index 0 is a DETACHED instance nothing is bound to. Writing there compiles
+// clean, reports "Saved", never bumps the script version, and leaves the chart
+// running the old code. Four rounds of edits went into that void. The editor is
+// now matched to the visible container by DOM node.
+//
+// FIRST, and the one that made the second hard to see: TradingView keeps more
+// than one `.monaco-editor.pine-editor-monaco` node in the DOM: a collapsed 0x0
+// one that was never mounted, and the live one. `querySelector` returns the
+// collapsed node first, it carries no React fiber, and every caller then
+// concluded "Pine editor closed" while the editor was plainly open on screen.
+// Both traversals below now pick the first node with a non-zero bounding box.
 import CDP from 'chrome-remote-interface';
 import { readFileSync } from 'fs';
 
@@ -15,7 +30,7 @@ await c.Runtime.enable();
 // Inject source
 const escaped = JSON.stringify(src);
 const set = (await c.Runtime.evaluate({
-  expression: `(function(){var c=document.querySelector(".monaco-editor.pine-editor-monaco");if(!c)return false;var el=c;var fk;for(var i=0;i<20;i++){if(!el)break;fk=Object.keys(el).find(function(k){return k.startsWith("__reactFiber$")});if(fk)break;el=el.parentElement}if(!fk)return false;var cur=el[fk];for(var d=0;d<15;d++){if(!cur)break;if(cur.memoizedProps&&cur.memoizedProps.value&&cur.memoizedProps.value.monacoEnv){var env=cur.memoizedProps.value.monacoEnv;if(env.editor&&typeof env.editor.getEditors==="function"){var eds=env.editor.getEditors();if(eds.length>0){eds[0].setValue(${escaped});return true}}}cur=cur.return}return false})()`,
+  expression: `(function(){var els=document.querySelectorAll(".monaco-editor.pine-editor-monaco");var c=null;for(var q=0;q<els.length;q++){var rr=els[q].getBoundingClientRect();if(rr.width>0&&rr.height>0){c=els[q];break}}if(!c)return false;var el=c;var fk;for(var i=0;i<20;i++){if(!el)break;fk=Object.keys(el).find(function(k){return k.startsWith("__reactFiber$")});if(fk)break;el=el.parentElement}if(!fk)return false;var cur=el[fk];for(var d=0;d<15;d++){if(!cur)break;if(cur.memoizedProps&&cur.memoizedProps.value&&cur.memoizedProps.value.monacoEnv){var env=cur.memoizedProps.value.monacoEnv;if(env.editor&&typeof env.editor.getEditors==="function"){var eds=env.editor.getEditors();var pick=null;for(var z=0;z<eds.length;z++){var dn=eds[z].getDomNode&&eds[z].getDomNode();if(dn&&(dn===c||c.contains(dn)||dn.contains(c))){pick=eds[z];break}}if(!pick&&eds.length>0)pick=eds[eds.length-1];if(pick){pick.setValue(${escaped});return true}}}cur=cur.return}return false})()`,
   returnByValue: true,
 })).result?.value;
 
@@ -37,7 +52,7 @@ if (!clicked) {
 // Wait then check errors
 await new Promise(r => setTimeout(r, 3000));
 const errors = (await c.Runtime.evaluate({
-  expression: '(function(){var c=document.querySelector(".monaco-editor.pine-editor-monaco");if(!c)return[];var el=c;var fk;for(var i=0;i<20;i++){if(!el)break;fk=Object.keys(el).find(function(k){return k.startsWith("__reactFiber$")});if(fk)break;el=el.parentElement}if(!fk)return[];var cur=el[fk];for(var d=0;d<15;d++){if(!cur)break;if(cur.memoizedProps&&cur.memoizedProps.value&&cur.memoizedProps.value.monacoEnv){var env=cur.memoizedProps.value.monacoEnv;if(env.editor&&typeof env.editor.getEditors==="function"){var eds=env.editor.getEditors();if(eds.length>0){var model=eds[0].getModel();var markers=env.editor.getModelMarkers({resource:model.uri});return markers.map(function(m){return{line:m.startLineNumber,msg:m.message}})}}}cur=cur.return}return[]})()',
+  expression: '(function(){var els=document.querySelectorAll(".monaco-editor.pine-editor-monaco");var c=null;for(var q=0;q<els.length;q++){var rr=els[q].getBoundingClientRect();if(rr.width>0&&rr.height>0){c=els[q];break}}if(!c)return[];var el=c;var fk;for(var i=0;i<20;i++){if(!el)break;fk=Object.keys(el).find(function(k){return k.startsWith("__reactFiber$")});if(fk)break;el=el.parentElement}if(!fk)return[];var cur=el[fk];for(var d=0;d<15;d++){if(!cur)break;if(cur.memoizedProps&&cur.memoizedProps.value&&cur.memoizedProps.value.monacoEnv){var env=cur.memoizedProps.value.monacoEnv;if(env.editor&&typeof env.editor.getEditors==="function"){var eds=env.editor.getEditors();var pick=null;for(var z=0;z<eds.length;z++){var dn=eds[z].getDomNode&&eds[z].getDomNode();if(dn&&(dn===c||c.contains(dn)||dn.contains(c))){pick=eds[z];break}}if(!pick&&eds.length>0)pick=eds[eds.length-1];if(pick){var model=pick.getModel();var markers=env.editor.getModelMarkers({resource:model.uri});return markers.map(function(m){return{line:m.startLineNumber,msg:m.message}})}}}cur=cur.return}return[]})()',
   returnByValue: true,
 })).result?.value || [];
 
