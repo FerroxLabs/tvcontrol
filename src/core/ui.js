@@ -93,15 +93,28 @@ export async function openPanel({ panel, action }) {
           // the dialog button, and let the caller verify.
           var acted = false;
           if (panel === 'pine-editor') {
-            // ORDER MATTERS, AND IT IS THE WHOLE BUG. The previous version
-            // called bottomWidgetBar FIRST and clicked the dialog button only
-            // as a fallback. Measured on Desktop 3.3.0: with the widget-bar
-            // call in front, the dialog never appeared within 3s and open
-            // failed every time; clicking the dialog button on its own opened
-            // it immediately and repeatably. bottomWidgetBar exists here and
-            // its methods do not throw, they just leave the editor shut and
-            // apparently leave TradingView believing it is already open, so
-            // the later click is ignored.
+            // ORDER MATTERS. The previous version called bottomWidgetBar
+            // FIRST and clicked the dialog button only as a fallback.
+            //
+            // MEASURED, and the platform split is the surprising part. The
+            // same 9-transition open/open-when-open/close cycle was run
+            // against live charts on three environments:
+            //
+            //   macOS   + Desktop 3.3.0   old order FAILS   new order 9/9
+            //   Windows + Desktop 3.3.0   old order works   new order 9/9
+            //   Windows + Chrome web      old order works   new order 9/9
+            //
+            // So this is a macOS-specific failure, NOT a Desktop-versus-web
+            // one. On macOS the widget-bar call leaves the editor shut and
+            // apparently leaves TradingView believing it is already open, so
+            // the click that follows is ignored and open never happens.
+            // bottomWidgetBar exists on every one of those builds and its
+            // methods never throw, which is why the old code believed it had
+            // worked.
+            //
+            // IF YOU ARE ON WINDOWS AND THE OLD ORDER LOOKS FINE: it is fine,
+            // there. It is broken on macOS. Do not revert this on the strength
+            // of a Windows test.
             //
             // So on any build that HAS the dialog button, that button is the
             // only thing used. bottomWidgetBar is kept solely for older builds
