@@ -22,15 +22,36 @@ import { registerTabTools } from './tools/tab.js';
 import { registerVisionTools } from './tools/vision.js';
 import { registerStateTools } from './tools/state.js';
 import { registerSweepTools } from './tools/sweep.js';
+import { discoverToolCatalog } from './core/capabilities.js';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+
+// THE SERVER WAS LYING ABOUT ITSELF.
+//
+// Measured 2026-08-21: package.json said 2.2.6, npm shipped 2.2.6, and this
+// file introduced itself to every client as version 2.2.1 with 102 tools while
+// actually registering 103 of a 104-tool catalog. Three hand-maintained numbers,
+// all wrong, none of them checked by anything. A tool count is the first thing
+// an agent reads and the last thing anyone remembers to bump.
+//
+// Derive all three. The catalog scan is the same one tv_capability_matrix uses,
+// so the server and the matrix can no longer disagree.
+const _pkg = JSON.parse(readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf8'));
+const CATALOG = discoverToolCatalog();
+const GATED = CATALOG.filter((name) => name === 'ui_evaluate');
+const TOOL_COUNT = CATALOG.length;
+const DEFAULT_COUNT = TOOL_COUNT - GATED.length;
 
 const server = new McpServer(
   {
     name: 'tvcontrol',
-    version: '2.2.1',
-    description: 'AI remote control for TradingView Desktop — 102 MCP tools driving symbols, indicators, Pine Script, snapshots, sweeps, diagnostics, and live chart vision over CDP.',
+    version: _pkg.version,
+    description: `AI remote control for TradingView Desktop — ${DEFAULT_COUNT} MCP tools driving symbols, indicators, Pine Script, snapshots, sweeps, diagnostics, and live chart vision over CDP.`,
   },
   {
-    instructions: `tvcontrol — 102 tools for reading, diagnosing, and controlling a live TradingView Desktop chart over Chrome DevTools Protocol.
+    instructions: `tvcontrol — ${DEFAULT_COUNT} tools for reading, diagnosing, and controlling a live TradingView Desktop chart over Chrome DevTools Protocol.
 
 TOOL SELECTION GUIDE — use this to pick the right tool:
 
@@ -68,7 +89,7 @@ Launch: tv_launch → auto-detect and start TradingView with CDP on any platform
 Panes: pane_list, pane_set_layout (s, 2h, 2v, 4, 6, 8), pane_focus, pane_set_symbol
 Tabs: tab_list, tab_new, tab_close, tab_switch
 
-Advanced (opt-in): ui_evaluate (run arbitrary page JS) is GATED behind the TV_MCP_ADVANCED=1 env var and is NOT registered by default. Of the 102-tool catalog, 101 are available unless that flag is set.
+Advanced (opt-in): ui_evaluate (run arbitrary page JS) is GATED behind the TV_MCP_ADVANCED=1 env var and is NOT registered by default. Of the ${TOOL_COUNT}-tool catalog, ${DEFAULT_COUNT} are available unless that flag is set.
 
 CONTEXT MANAGEMENT:
 - ALWAYS use summary=true on data_get_ohlcv

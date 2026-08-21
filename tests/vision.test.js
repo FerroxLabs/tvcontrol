@@ -154,28 +154,45 @@ describe('chartVisionRead()', () => {
     assert.equal(result.mime_type, 'image/png');
   });
 
-  it('7a. sections fan out in parallel (total time ≈ slowest section, not sum)', async () => {
-    const SECTION_DELAY_MS = 50;
-    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-    const slow = (val) => async () => { await sleep(SECTION_DELAY_MS); return val; };
+  it('7a. sections fan out in parallel (all eight in flight at once)', async () => {
+    // THIS TEST USED TO ASSERT WALL-CLOCK TIME: eight 50ms sections, "elapsed
+    // must be under 200ms". That is not a measurement of concurrency, it is a
+    // measurement of how busy the machine is, and it failed on a loaded laptop
+    // at 358ms while the code under test was perfectly parallel. A flaky test
+    // in a suite whose entire claim is determinism.
+    //
+    // Concurrency is directly observable: count how many sections are inside
+    // their async body at the same moment. Parallel means all eight overlap.
+    // Serial means the peak is one. No clock involved, so no flake.
+    let inFlight = 0;
+    let peak = 0;
+    const section = (val) => async () => {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      // Yield several times without finishing. Run in parallel, all eight are
+      // inside this body together and the peak is 8. Run serially, each one
+      // returns before the next begins and the peak is 1. Nothing here can
+      // deadlock if the code under test turns out to be serial, which is the
+      // failure mode this test has to survive in order to report it.
+      for (let i = 0; i < 4; i += 1) await new Promise((r) => setImmediate(r));
+      inFlight -= 1;
+      return val;
+    };
 
     const { _deps } = makeDeps({
-      getState:        slow({ success: true, symbol: 'X', resolution: 'D', chartType: 1, studies: [] }),
-      getQuote:        slow({ success: true, symbol: 'X', last: 1 }),
-      getStudyValues:  slow({ success: true, study_count: 0, studies: [] }),
-      getPineLines:    slow({ success: true, study_count: 0, studies: [] }),
-      getPineLabels:   slow({ success: true, study_count: 0, studies: [] }),
-      getPineTables:   slow({ success: true, study_count: 0, studies: [] }),
-      getPineBoxes:    slow({ success: true, study_count: 0, studies: [] }),
-      getOhlcv:        slow({ success: true, bar_count: 0 }),
+      getState:        section({ success: true, symbol: 'X', resolution: 'D', chartType: 1, studies: [] }),
+      getQuote:        section({ success: true, symbol: 'X', last: 1 }),
+      getStudyValues:  section({ success: true, study_count: 0, studies: [] }),
+      getPineLines:    section({ success: true, study_count: 0, studies: [] }),
+      getPineLabels:   section({ success: true, study_count: 0, studies: [] }),
+      getPineTables:   section({ success: true, study_count: 0, studies: [] }),
+      getPineBoxes:    section({ success: true, study_count: 0, studies: [] }),
+      getOhlcv:        section({ success: true, bar_count: 0 }),
     });
 
-    const t0 = Date.now();
     const result = await chartVisionRead({ _deps });
-    const elapsed = Date.now() - t0;
     assert.ok(result.success);
-    // 8 sections × 50ms serial = 400ms. Parallel = ~50ms. Cap at 200ms to give CI breathing room.
-    assert.ok(elapsed < 200, `expected parallel fan-out (<200ms), got ${elapsed}ms`);
+    assert.equal(peak, 8, `expected all 8 sections in flight at once, peak was ${peak}`);
   });
 
   it('7. file_path always present regardless of image_mode', async () => {

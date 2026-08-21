@@ -2,6 +2,58 @@
 
 All notable changes to TVControl are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [2.3.0] - 2026-08-21
+
+Minor, not a patch: two new tools and several changed return shapes.
+
+### Added
+
+- **`alert_create_bulk`** — create price alerts across many symbols, or the
+  whole active watchlist, in one call. Does not touch the chart. Each alert can
+  carry a `webhook_url`, so every fire posts to your own endpoint instead of
+  your inbox. `percent_from_last` prices each alert from that symbol's own live
+  price, which is the only level that means the same thing across a mixed
+  watchlist. `dry_run: true` returns the full plan without creating anything.
+  The whole batch is verified with a single read of the alert list afterwards.
+  Measured: 29-symbol dry run in 536ms; three real webhook alerts created and
+  verified in 2s.
+- **`quote_batch`** — live quotes for many symbols in one server-side request.
+  29 symbols in 272ms. Names the symbols it could not resolve rather than
+  returning a shorter list. `quote_get` switches the chart symbol and takes
+  about 20s each, so it must never be looped.
+- **`tests/hermetic_deps.test.js`** and a `TV_MCP_NO_CDP` guard that makes any
+  real browser call from an offline test throw and name itself.
+
+### Fixed
+
+- **The offline test suite was calling `removeAllShapes()` on the live chart.**
+  `restore()` called `drawing.clearAll()` and `pane.setLayout()` with no
+  `_deps`, and the dependency fallback fails open, so both resolved to the real
+  CDP functions. Every `npm test` cleared the drawings on whichever pane was
+  active. It did no damage only because that pane was empty. `snapshot()` had
+  the same hole in three read paths. All five now thread `_deps`.
+- **The test count moved between runs of the same tree** — 638, 625, 638, all
+  reported green. `--test-force-exit`, added to work around the hang caused by
+  the leak above, was racing the run to a close and taking live tests with it.
+  Removed. Four consecutive runs now report 645/645 and the suite exits on its
+  own in about 13s, down from roughly 40s.
+- **The server misdescribed itself to every client.** It announced version
+  2.2.1 with "102 tools" while shipping 2.2.6 and registering 103 of a
+  104-tool catalog. Version and both counts are now derived at startup and
+  asserted against what the server actually returns on the wire.
+- **`pine_new` reported `new_script_created` and created nothing.** It replaced
+  the editor buffer with a template. It now refuses to overwrite a non-trivial
+  buffer without `confirm_overwrite: true`, and fails closed when it cannot
+  read the buffer to check.
+- **A concurrency test asserted wall-clock time** and failed on a loaded
+  machine while the code under test was correct. It now counts how many
+  sections are in flight at once, which is the property it was trying to prove.
+
+### Changed
+
+- `README` corrected: 103 tools and 645 tests, not 102 and 512, and it now
+  documents the watchlist-wide alert sweep.
+
 ## [2.2.6] - 2026-08-20
 
 Two independent adversarial audits (Kimi K3, Codex 5.6) reviewed 2.2.5 with full
