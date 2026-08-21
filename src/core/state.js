@@ -15,7 +15,7 @@ import { strictResolve } from './_resolve.js';
 import { parseJsonSafe } from './_json.js';
 
 const _STATE_DEPS = new Set([
-  'evaluate', 'evaluateAsync', 'waitForChartReady',
+  'evaluate', 'evaluateAsync', 'waitForChartReady', 'wait',
   'paneList', 'drawingList', 'drawingProps', 'drawingClearAll',
 ]);
 
@@ -29,12 +29,35 @@ function _resolve(deps) {
     evaluate: deps?.evaluate || _evaluate,
     evaluateAsync: deps?.evaluateAsync || _evaluateAsync,
     waitForChartReady: deps?.waitForChartReady || _waitForChartReady,
+    // restore() settles between CDP writes. These were bare setTimeouts, which
+    // made 30 unit tests spend 16 seconds asleep. Injectable now — and under
+    // TV_MCP_NO_CDP there is no browser to settle, so the wait is a no-op.
+    wait: deps?.wait || (process.env.TV_MCP_NO_CDP
+      ? (async () => {})
+      : ((ms) => new Promise((r) => setTimeout(r, ms)))),
     // Optional overrides for pane.list() and drawing calls (used in tests)
     paneList: deps?.paneList || null,
     drawingList: deps?.drawingList || null,
     drawingProps: deps?.drawingProps || null,
     drawingClearAll: deps?.drawingClearAll || null,
   };
+}
+
+/**
+ * The subset of `_deps` that is safe to hand DOWN to another core module.
+ *
+ * `paneList`/`drawingList`/`drawingProps`/`drawingClearAll` are state.js's own
+ * override keys. Every other core module runs strictResolve and rejects keys it
+ * does not know, so passing the raw object down throws a TypeError. Strip them.
+ */
+const _STATE_LOCAL_KEYS = ['paneList', 'drawingList', 'drawingProps', 'drawingClearAll', 'wait'];
+function _down(deps) {
+  if (deps == null) return deps;
+  const out = {};
+  for (const [k, v] of Object.entries(deps)) {
+    if (!_STATE_LOCAL_KEYS.includes(k)) out[k] = v;
+  }
+  return out;
 }
 
 function _validateName(name) {
@@ -90,7 +113,7 @@ export async function snapshot({ name, overwrite = false, _deps, _snapshots_dir 
   const skipped_at_snapshot = [];
 
   // Fetch chart state
-  const chartState = await chart.getState({ _deps });
+  const chartState = await chart.getState({ _deps: _down(_deps) });
 
   // Fetch pane list (use injected fn if provided, else real pane.list())
   // Errors must surface — silent default-to-empty meant a broken pane API
@@ -98,7 +121,7 @@ export async function snapshot({ name, overwrite = false, _deps, _snapshots_dir 
   let paneList = [];
   let paneLayout = null;
   try {
-    const paneResult = _paneListFn ? await _paneListFn() : await pane.list();
+    const paneResult = _paneListFn ? await _paneListFn() : await pane.list({ _deps: _down(_deps) });
     paneList = paneResult.panes || [];
     // Keep the REAL layout, and whether it can be trusted. See the payload below.
     paneLayout = {
@@ -113,8 +136,8 @@ export async function snapshot({ name, overwrite = false, _deps, _snapshots_dir 
   // Fetch drawings with properties (use injected fns if provided)
   let drawingsData = [];
   try {
-    const listFn = _drawingListFn || (() => drawing.listDrawings());
-    const propsFn = _drawingPropsFn || (({ entity_id }) => drawing.getProperties({ entity_id }));
+    const listFn = _drawingListFn || (() => drawing.listDrawings({ _deps: _down(_deps) }));
+    const propsFn = _drawingPropsFn || (({ entity_id }) => drawing.getProperties({ entity_id, _deps: _down(_deps) }));
     const { shapes } = await listFn();
     for (const shape of (shapes || [])) {
       try {
@@ -373,6 +396,7 @@ export async function snapshot({ name, overwrite = false, _deps, _snapshots_dir 
  * Restore a chart state from a named snapshot.
  */
 export async function restore({ name, _deps, _snapshots_dir } = {}) {
+  const { wait: _wait } = _resolve(_deps);
   _validateName(name);
   const dir = _snapshots_dir || SNAPSHOTS_DIR;
   const filePath = _snapshotPath(name, dir);
@@ -406,7 +430,7 @@ export async function restore({ name, _deps, _snapshots_dir } = {}) {
   //    roundtrips, now 1. Each per-study failure still propagates into
   //    skipped[] so the caller sees any state contamination.
   try {
-    const currentState = await chart.getState({ _deps });
+    const currentState = await chart.getState({ _deps: _down(_deps) });
     const studiesToClear = currentState.studies || [];
     if (studiesToClear.length > 0) {
       const { evaluate } = _resolve(_deps);
@@ -441,7 +465,7 @@ export async function restore({ name, _deps, _snapshots_dir } = {}) {
   try {
     const { drawingClearAll: _clearAllFn } = _resolve(_deps);
     if (_clearAllFn) await _clearAllFn();
-    else await drawing.clearAll();
+    else await drawing.clearAll({ _deps: _down(_deps) });
   } catch (err) {
     skipped.push({ field: 'pre_clear_drawings', reason: err.message });
   }
@@ -466,9 +490,9 @@ export async function restore({ name, _deps, _snapshots_dir } = {}) {
       });
     } else {
       try {
-        await pane.setLayout({ layout: snap.layout.code });
+        await pane.setLayout({ layout: snap.layout.code, _deps: _down(_deps) });
         // setLayout reports on itself; confirm from a fresh read.
-        const after = await pane.list({ _deps });
+        const after = await pane.list({ _deps: _down(_deps) });
         if (after.chart_count === snap.layout.pane_count) {
           applied.push('layout');
         } else {
@@ -477,7 +501,7 @@ export async function restore({ name, _deps, _snapshots_dir } = {}) {
             reason: `setLayout("${snap.layout.code}") was accepted but the chart now has ${after.chart_count} pane(s), not the ${snap.layout.pane_count} the snapshot recorded`,
           });
         }
-        await new Promise(r => setTimeout(r, 300));
+        await _wait(300);
       } catch (err) {
         skipped.push({ field: 'layout', reason: err.message });
       }
@@ -489,25 +513,25 @@ export async function restore({ name, _deps, _snapshots_dir } = {}) {
   if (pane0) {
     if (pane0.symbol) {
       try {
-        await chart.setSymbol({ symbol: pane0.symbol, _deps });
+        await chart.setSymbol({ symbol: pane0.symbol, _deps: _down(_deps) });
         applied.push(`symbol:${pane0.symbol}`);
-        await new Promise(r => setTimeout(r, 300));
+        await _wait(300);
       } catch (err) {
         skipped.push({ field: 'symbol', reason: err.message });
       }
     }
     if (pane0.resolution) {
       try {
-        await chart.setTimeframe({ timeframe: pane0.resolution, _deps });
+        await chart.setTimeframe({ timeframe: pane0.resolution, _deps: _down(_deps) });
         applied.push(`resolution:${pane0.resolution}`);
-        await new Promise(r => setTimeout(r, 300));
+        await _wait(300);
       } catch (err) {
         skipped.push({ field: 'resolution', reason: err.message });
       }
     }
     if (pane0.chart_type != null) {
       try {
-        await chart.setType({ chart_type: pane0.chart_type, _deps });
+        await chart.setType({ chart_type: pane0.chart_type, _deps: _down(_deps) });
         applied.push(`chart_type:${pane0.chart_type}`);
       } catch (err) {
         skipped.push({ field: 'chart_type', reason: err.message });
@@ -521,7 +545,7 @@ export async function restore({ name, _deps, _snapshots_dir } = {}) {
   // 3. Visible range
   if (snap.visible_range && snap.visible_range.from != null && snap.visible_range.to != null) {
     try {
-      await chart.setVisibleRange({ from: snap.visible_range.from, to: snap.visible_range.to, _deps });
+      await chart.setVisibleRange({ from: snap.visible_range.from, to: snap.visible_range.to, _deps: _down(_deps) });
       applied.push('visible_range');
     } catch (err) {
       skipped.push({ field: 'visible_range', reason: err.message });
@@ -534,7 +558,7 @@ export async function restore({ name, _deps, _snapshots_dir } = {}) {
   // strategy the user wants and we just want to update its inputs).
   let loadedStudyNames = new Set();
   try {
-    const cs = await chart.getState({ _deps });
+    const cs = await chart.getState({ _deps: _down(_deps) });
     for (const s of (cs.studies || [])) loadedStudyNames.add(s.name);
   } catch (_) { /* non-fatal; treat all as missing and try to add */ }
 
@@ -573,7 +597,7 @@ export async function restore({ name, _deps, _snapshots_dir } = {}) {
         });
         if (injectResult.success) {
           applied.push(`study:${study.name} (published_pine)`);
-          await new Promise((r) => setTimeout(r, 500));
+          await _wait(500);
           continue;
         }
         skipped.push({
@@ -600,7 +624,7 @@ export async function restore({ name, _deps, _snapshots_dir } = {}) {
       const inputs = Array.isArray(study.inputs)
         ? Object.fromEntries(study.inputs.map((inp) => [inp.id, inp.value]))
         : {};
-      const addResult = await chart.manageIndicator({ action: 'add', indicator: study.name, inputs, _deps });
+      const addResult = await chart.manageIndicator({ action: 'add', indicator: study.name, inputs, _deps: _down(_deps) });
       if (addResult && addResult.success === false) {
         skipped.push({
           field: 'study',
@@ -611,7 +635,7 @@ export async function restore({ name, _deps, _snapshots_dir } = {}) {
         continue;
       }
       applied.push(`study:${study.name}`);
-      await new Promise((r) => setTimeout(r, 500));
+      await _wait(500);
     } catch (err) {
       skipped.push({ field: 'study', name: study.name, reason: err.message });
     }
@@ -626,7 +650,7 @@ export async function restore({ name, _deps, _snapshots_dir } = {}) {
         skipped.push({ field: 'drawing', shape: d.shape, reason: 'no points in snapshot' });
         continue;
       }
-      await drawing.drawShape({ shape: d.shape, point, point2, overrides: d.overrides, text: d.text, _deps });
+      await drawing.drawShape({ shape: d.shape, point, point2, overrides: d.overrides, text: d.text, _deps: _down(_deps) });
       applied.push(`drawing:${d.shape}`);
     } catch (err) {
       skipped.push({ field: 'drawing', shape: d.shape, reason: err.message });

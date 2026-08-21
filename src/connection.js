@@ -174,6 +174,32 @@ export async function _acquireProcessConnectLock({
   });
 }
 
+/**
+ * OFFLINE TEST GUARD.
+ *
+ * The offline suite is supposed to be hermetic. It was not. On 2026-08-21 a
+ * trace showed `tests/state.test.js` opening a real WebSocket to 127.0.0.1:9222
+ * and calling `drawing.clearAll()` — `removeAllShapes()` — against the live
+ * chart, because `restore()` handed no `_deps` to two sub-module calls and the
+ * fallback silently resolved to production. Every "unit" run of that file was
+ * deleting the operator's annotations and rewriting the pane layout.
+ *
+ * Threading `_deps` fixes those two sites. This fixes the CLASS: when
+ * TV_MCP_NO_CDP is set, any attempt to reach the browser throws immediately
+ * and names itself, so the next escape is a red test rather than a lost
+ * drawing. run_offline_tests.js sets it.
+ */
+export function _assertCdpAllowed(what) {
+  if (process.env.TV_MCP_NO_CDP) {
+    throw new ClassifiedError(
+      CATEGORIES.CDP_DISCONNECTED,
+      `Blocked a real CDP call (${what}) while TV_MCP_NO_CDP is set. ` +
+      'An offline test reached production code instead of its injected _deps. ' +
+      'Pass _deps down to the call in the stack above rather than relaxing this guard.',
+    );
+  }
+}
+
 export async function fetchCdpResponse(path, {
   timeoutMs = CDP_HTTP_TIMEOUT_MS,
   fetchImpl = globalThis.fetch,
@@ -182,6 +208,8 @@ export async function fetchCdpResponse(path, {
   if (typeof path !== 'string' || !path.startsWith('/')) {
     throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'CDP path must start with /');
   }
+  // Only a REAL fetch reaches the browser. An injected fetchImpl is a test double.
+  if (fetchImpl === globalThis.fetch) _assertCdpAllowed(`fetchCdpResponse ${path}`);
   return fetchImpl(`http://${CDP_HOST}:${CDP_PORT}${path}`, {
     ...fetchOptions,
     signal: fetchOptions.signal || globalThis.AbortSignal.timeout(timeoutMs),
@@ -197,6 +225,7 @@ export async function _fetchCdpJson(path, options = {}) {
 }
 
 export async function getClient() {
+  _assertCdpAllowed('getClient');
   if (client) {
     try {
       // Quick liveness check

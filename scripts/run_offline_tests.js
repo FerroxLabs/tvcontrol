@@ -9,18 +9,16 @@ const tests = readdirSync('tests')
   .map((name) => join('tests', name));
 
 const args = ['--test'];
-// --test-force-exit landed in Node 22.0.0, not 25. With the gate set to 25 this
-// suite HUNG FOREVER on Node 22: tests/state.test.js passes all 30 of its tests
-// and then leaves a handle on the event loop, so the runner never exits. Node's
-// TAP reporter buffers until the end, so the hang produced ZERO output rather
-// than a visible failure, and `npm test` looked like it was still working.
+// NO --test-force-exit. It used to be here because tests/state.test.js left a
+// handle on the event loop and the runner never exited. That handle was a live
+// CDP WebSocket: restore() called drawing.clearAll() and pane.setLayout()
+// without passing _deps, so the "unit" test ran removeAllShapes() against the
+// operator's real chart. Both now thread _deps, and TV_MCP_NO_CDP below makes
+// any future escape throw instead of connecting.
 //
-// Measured on Node v22.23.1: gate at 25 -> killed at 600s with no output;
-// gate at 22 -> whole suite completes.
-//
-// This makes the suite usable. It does NOT fix the leaked handle in
-// state.test.js, it papers over it, and that handle is still worth finding.
-if (Number(process.versions.node.split('.')[0]) >= 22) args.push('--test-force-exit');
+// Force-exit was not just papering over that — it was CAUSING the count wobble
+// documented below, by racing the run to a close and taking live tests with it.
+// Measured after the fix: 638/638 every run, suite exits on its own in ~14s.
 args.push(...tests);
 
 // THE SUITE SILENTLY DROPPED 13 TESTS AND STILL EXITED 0.
@@ -36,9 +34,16 @@ args.push(...tests);
 // looking like success.
 //
 // RAISE THIS when you add tests. It is meant to be edited.
-const EXPECTED_MIN_TESTS = 638;
+const EXPECTED_MIN_TESTS = 642;
 
-const result = spawnSync(process.execPath, args, { encoding: 'utf-8' });
+// HERMETIC. Any core function that reaches the real browser instead of its
+// injected _deps now throws and fails the test that did it. Before this flag,
+// tests/state.test.js was calling removeAllShapes() on the operator's live
+// chart every run and reporting "ok".
+const result = spawnSync(process.execPath, args, {
+  encoding: 'utf-8',
+  env: { ...process.env, TV_MCP_NO_CDP: '1' },
+});
 if (result.stdout) process.stdout.write(result.stdout);
 if (result.stderr) process.stderr.write(result.stderr);
 if (result.error) {

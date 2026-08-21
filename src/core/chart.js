@@ -18,7 +18,11 @@ function _resolve(deps) {
     evaluate: deps?.evaluate || _evaluate,
     evaluateAsync: deps?.evaluateAsync || _evaluateAsync,
     waitForChartReady: deps?.waitForChartReady || _waitForChartReady,
-    sleep: deps?.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
+    // Under TV_MCP_NO_CDP there is no browser, so there is nothing to settle
+    // for. See _assertCdpAllowed in connection.js.
+    sleep: deps?.sleep || (process.env.TV_MCP_NO_CDP
+      ? (async () => {})
+      : ((ms) => new Promise((resolve) => setTimeout(resolve, ms)))),
     fetch: deps?.fetch || globalThis.fetch,
   };
 }
@@ -104,7 +108,7 @@ export async function setType({ chart_type, _deps }) {
 }
 
 export async function manageIndicator({ action, indicator, entity_id, inputs: inputsRaw, _deps }) {
-  const { evaluate } = _resolve(_deps);
+  const { evaluate, sleep } = _resolve(_deps);
   let inputs;
   try {
     inputs = inputsRaw ? (typeof inputsRaw === 'string' ? JSON.parse(inputsRaw) : inputsRaw) : undefined;
@@ -128,7 +132,7 @@ export async function manageIndicator({ action, indicator, entity_id, inputs: in
         chart.createStudy(${safeString(indicator)}, false, false, ${JSON.stringify(inputArr)});
       })()
     `);
-    await new Promise(r => setTimeout(r, 1500));
+    await sleep(1500);
     const after = await evaluate(`${CHART_API}.getAllStudies().map(function(s) { return s.id; })`);
     const newIds = (after || []).filter(id => !(before || []).includes(id));
     if (newIds.length === 0) {
