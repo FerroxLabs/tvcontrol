@@ -26,7 +26,7 @@ export function registerPineTools(server) {
     catch (err) { return errorResult(err); }
   });
 
-  server.tool('pine_save', 'Save the current Pine Script (Ctrl+S)', {}, async () => {
+  server.tool('pine_save', 'Save the current Pine Script buffer to the saved script the editor is bound to. WARNING: this persists to the cloud and overwrites that script. Verified by reading the editor Save/Saved state; an unverified save is never reported as success.', {}, async () => {
     try { return jsonResult(await core.save()); }
     catch (err) { return errorResult(err); }
   });

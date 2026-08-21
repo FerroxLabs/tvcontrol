@@ -721,14 +721,31 @@ export async function save() {
     await new Promise(r => setTimeout(r, 200));
   }
 
+  // The button read above was already honest. The RETURN was not: success was
+  // hardcoded true while `saved` sat beside it saying false. Telling someone
+  // their Pine script is saved when it is not is the one direction that costs
+  // work, and every caller in this codebase branches on success.
+  //
+  // Unlike alert_create, retrying a save is harmless, so a definite "still
+  // unsaved" throws rather than being reported as a qualified win.
+  if (saved === false) {
+    throw new ClassifiedError(
+      CATEGORIES.API_UNEXPECTED,
+      'The save chord was dispatched but the Pine editor still reports unsaved changes',
+      { hint: 'The keystroke may have gone to the chart layout rather than the editor. Click into the Pine editor and retry.' },
+    );
+  }
+
   return {
-    success: true,
-    action: dialogHandled ? 'saved_with_dialog' : 'save_chord_dispatched',
     // null means the button could not be located, which is NOT the same as
-    // saved. Callers that care must treat null as unknown, not as success.
-    saved: saved,
-    ...(saved === false ? { warning: 'The editor still reports unsaved changes.' } : {}),
-    ...(saved === null ? { warning: 'Could not find the Pine save button, so the save is UNVERIFIED.' } : {}),
+    // saved. It is reported as an unverified save, never as a successful one.
+    success: saved === true,
+    action: dialogHandled ? 'saved_with_dialog' : 'save_chord_dispatched',
+    saved,
+    verified: saved === true ? true : null,
+    ...(saved === null
+      ? { warning: 'Could not find the Pine save button, so the save is UNVERIFIED. Check the editor before relying on this.' }
+      : {}),
   };
 }
 

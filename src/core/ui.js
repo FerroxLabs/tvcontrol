@@ -358,6 +358,20 @@ export async function layoutSwitch({ name, discard_unsaved = false }) {
   `);
   if (!result?.success) throw new ClassifiedError(CATEGORIES.TV_UI_CHANGED, result?.error || 'Unknown error switching layout');
 
+  // WHAT THE CHART LOOKED LIKE BEFORE, so the switch can be proved rather than
+  // assumed. loadChartFromServer() is fire-and-forget: the in-page promise
+  // resolves the instant it is called, long before any chart has loaded.
+  // MEASURED 2026-08-21: switching a 2-pane BTCUSDT layout to "MarketOverview"
+  // (ES1! 1D) returned success:true TWICE while the chart never moved.
+  const beforeState = await evaluate(`
+    (function() {
+      try {
+        var api = window.TradingViewApi._activeChartWidgetWV.value();
+        return { symbol: api._chartWidget.model().mainSeries().symbol(), res: api._chartWidget.model().mainSeries().interval() };
+      } catch (e) { return null; }
+    })()
+  `);
+
   // THE UNSAVED-CHANGES DIALOG IS A DECISION, NOT A NUISANCE.
   //
   // This used to hunt every button on the page for /open anyway|don't save|
@@ -412,7 +426,49 @@ export async function layoutSwitch({ name, discard_unsaved = false }) {
     await new Promise(r => setTimeout(r, 1000));
   }
 
-  return { success: true, layout: result.name || name, layout_id: result.id, source: result.source, action: 'switched', unsaved_changes_discarded: dismissed };
+  // POLL FOR THE CHART TO ACTUALLY CHANGE. A layout whose symbol matches the
+  // one already loaded is indistinguishable from no switch at all, so that case
+  // is reported as unconfirmed rather than claimed.
+  let afterState = beforeState;
+  let moved = false;
+  for (let i = 0; i < 12; i++) {
+    await new Promise((r) => setTimeout(r, 500));
+    afterState = await evaluate(`
+      (function() {
+        try {
+          var api = window.TradingViewApi._activeChartWidgetWV.value();
+          return { symbol: api._chartWidget.model().mainSeries().symbol(), res: api._chartWidget.model().mainSeries().interval() };
+        } catch (e) { return null; }
+      })()
+    `);
+    if (afterState && beforeState && (afterState.symbol !== beforeState.symbol || afterState.res !== beforeState.res)) {
+      moved = true;
+      break;
+    }
+  }
+
+  if (!moved) {
+    throw new ClassifiedError(
+      CATEGORIES.API_UNEXPECTED,
+      `loadChartFromServer was called for "${result.name || name}" but the chart never changed (still ${beforeState?.symbol || 'unknown'} ${beforeState?.res || ''})`,
+      {
+        hint: 'If that layout genuinely uses the symbol and timeframe already on screen, the switch cannot be distinguished from a no-op. Otherwise the layout id may be stale: re-run layout_list.',
+        details: { before: beforeState, after: afterState },
+      },
+    );
+  }
+
+  return {
+    success: true,
+    layout: result.name || name,
+    layout_id: result.id,
+    source: result.source,
+    action: 'switched',
+    unsaved_changes_discarded: dismissed,
+    symbol: afterState?.symbol ?? null,
+    resolution: afterState?.res ?? null,
+    verified: true,
+  };
 }
 
 export async function keyboard({ key, modifiers }) {
