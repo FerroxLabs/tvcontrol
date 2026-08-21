@@ -35,7 +35,13 @@ describe('indicator settings and visibility', () => {
     });
     assert.equal(result.success, true);
     assert.deepEqual(result.updated_inputs, { length: 50, source: 'close' });
-    assert.match(expression, /getStudyById\("study-1"\)/);
+    // The expression no longer inlines getStudyById("study-1"): a Pine study's
+    // id is a reference that cannot be serialized, so the study is resolved in
+    // the page. What still has to be true is that the ref reaches the page
+    // escaped, and that it is the ref the caller asked for.
+    assert.match(expression, /__tvResolveStudy\(chart, "study-1"\)/);
+    assert.match(expression, /chart\.getStudyById\(hits\[0\]\.id\)/,
+      'resolution must go through the live handle, never a serialized id');
   });
 
   it('accepts a JSON-encoded input object', async () => {

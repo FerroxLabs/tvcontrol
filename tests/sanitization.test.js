@@ -192,8 +192,16 @@ describe('chart.js — sanitized evaluate calls', () => {
 
   it('manageIndicator remove uses safeString for entity_id', async () => {
     const { _deps, evaluate } = mockDeps();
+    // remove() now refuses to report success without a count that actually
+    // dropped, so the mock has to answer like a real removal or the call
+    // throws before the expression can be inspected.
+    _deps.evaluate = async (expr) => {
+      evaluate.calls.push(expr);
+      return { before: 2, after: 1, removed_name: 'abc123' };
+    };
     await manageIndicator({ action: 'remove', entity_id: "abc123", _deps });
     const call = evaluate.calls.find(c => c.includes('removeEntity'));
+    assert.ok(call, 'removeEntity is in the expression');
     assert.ok(call.includes('"abc123"'), 'entity_id via safeString');
   });
 

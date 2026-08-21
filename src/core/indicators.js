@@ -2,6 +2,7 @@
  * Core indicator settings logic.
  */
 import { evaluate, safeString } from '../connection.js';
+import { STUDY_RESOLVER_JS } from './_study_ref.js';
 import { ClassifiedError, CATEGORIES } from '../errors.js';
 
 const CHART_API = 'window.TradingViewApi._activeChartWidgetWV.value()';
@@ -189,7 +190,10 @@ export async function setInputs({ entity_id, inputs: inputsRaw, _deps } = {}) {
   const result = await deps.evaluate(`
     (function() {
       var chart = ${CHART_API};
-      var study = chart.getStudyById(${safeString(entity_id)});
+      ${STUDY_RESOLVER_JS()}
+      var __r = __tvResolveStudy(chart, ${safeString(entity_id)});
+      if (__r.error) return { error: __r.error };
+      var study = __r.study;
       if (!study) return { error: 'Study not found: ' + ${safeString(entity_id)} };
       var currentInputs = study.getInputValues();
       var overrides = ${inputsJson};
@@ -272,7 +276,10 @@ export async function toggleVisibility({ entity_id, visible, _deps } = {}) {
   const result = await deps.evaluate(`
     (function() {
       var chart = ${CHART_API};
-      var study = chart.getStudyById(${safeString(entity_id)});
+      ${STUDY_RESOLVER_JS()}
+      var __r = __tvResolveStudy(chart, ${safeString(entity_id)});
+      if (__r.error) return { error: __r.error };
+      var study = __r.study;
       if (!study) return { error: 'Study not found: ' + ${safeString(entity_id)} };
       var was = study.isVisible();
       var want = ${visible === undefined ? '!was' : String(visible)};

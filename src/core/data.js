@@ -2,6 +2,7 @@
  * Core data access logic.
  */
 import { evaluate, evaluateAsync, KNOWN_PATHS, safeString } from '../connection.js';
+import { STUDY_RESOLVER_JS } from './_study_ref.js';
 import { ClassifiedError, CATEGORIES } from '../errors.js';
 import { waitForChartReady } from '../wait.js';
 import * as ui from './ui.js';
@@ -244,7 +245,10 @@ export async function getIndicator({ entity_id, _deps } = {}) {
   const data = await deps.evaluate(`
     (function() {
       var api = ${CHART_API};
-      var study = api.getStudyById(${safeString(entity_id)});
+      ${STUDY_RESOLVER_JS()}
+      var __r = __tvResolveStudy(api, ${safeString(entity_id)});
+      if (__r.error) return { error: __r.error };
+      var study = __r.study;
       if (!study) return { error: 'Study not found: ' + ${safeString(entity_id)} };
       var result = { name: null, inputs: null, visible: null };
       try { result.visible = study.isVisible(); } catch(e) {}

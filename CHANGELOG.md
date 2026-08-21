@@ -21,11 +21,33 @@ Minor, not a patch: two new tools and several changed return shapes.
   29 symbols in 272ms. Names the symbols it could not resolve rather than
   returning a shorter list. `quote_get` switches the chart symbol and takes
   about 20s each, so it must never be looped.
+- **`tests/study_addressing.test.js`** executes the real page-side JS against
+  a fake TradingView, so logic that lives inside an `evaluate()` template is
+  covered rather than assumed.
 - **`tests/hermetic_deps.test.js`** and a `TV_MCP_NO_CDP` guard that makes any
   real browser call from an offline test throw and name itself.
 
 ### Fixed
 
+- **A Pine study had no address, so four tools could never reach one.**
+  TradingView gives a built-in study a string id ("T4x6LH") and gives every
+  Pine study its own distinct empty Array. `getStudyById` resolves that by
+  reference identity, so a fresh `[]` throws "There is no such study": the id
+  is a handle, not data, and it cannot survive serialization. `chart_get_state`
+  was returning that `[]` to callers as their `entity_id`, and
+  `data_get_indicator`, `indicator_set_inputs`, `indicator_toggle_visibility`
+  and `chart_manage_indicator` all take an `entity_id` string. On a product
+  whose users keep their work in Pine, none of them worked on it.
+
+  `chart_get_state` now reports `id: null` with `addressable_by: "name"` and
+  the `script_id` from metaInfo, and all four tools resolve the study in the
+  page, where the reference still exists. Verified live: a 66-input Pine
+  indicator read, hidden, shown and had an input set and reverted, all by name.
+  An ambiguous name is refused rather than guessed.
+- **`chart_manage_indicator` remove returned a hardcoded success.** It called
+  `removeEntity` and said `success: true` without looking, so a bad id, a
+  Pine study, or a throw inside the page all reported the same thing as a real
+  removal. It now counts before and after and names the study that went.
 - **The offline test suite was calling `removeAllShapes()` on the live chart.**
   `restore()` called `drawing.clearAll()` and `pane.setLayout()` with no
   `_deps`, and the dependency fallback fails open, so both resolved to the real

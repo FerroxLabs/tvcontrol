@@ -2,6 +2,7 @@
  * Core chart control logic.
  */
 import { evaluate as _evaluate, evaluateAsync as _evaluateAsync, safeString, requireFinite } from '../connection.js';
+import { STUDY_RESOLVER_JS, isUsableStudyId } from './_study_ref.js';
 import { waitForChartReady as _waitForChartReady } from '../wait.js';
 import { ClassifiedError, CATEGORIES } from '../errors.js';
 
@@ -27,6 +28,26 @@ function _resolve(deps) {
   };
 }
 
+/**
+ * A PINE STUDY'S id IS AN EMPTY ARRAY, AND IT USED TO BE HANDED STRAIGHT TO THE
+ * CALLER AS entity_id.
+ *
+ * Measured 2026-08-21 against TradingView Desktop: getAllStudies() gives
+ * built-ins a string id ("T4x6LH") and gives every Pine study its own distinct
+ * empty Array. getStudyById resolves that by reference identity, so a fresh []
+ * throws "There is no such study". Serializing it over CDP is the same as
+ * throwing it away. Four tools take an entity_id string, so every one of them
+ * was unreachable for a Pine study, and the caller was told the id was []
+ * rather than told why.
+ *
+ * getState now reports null for those, says the study is addressable by name,
+ * and returns the script id from metaInfo so it is at least identifiable.
+ * See _study_ref.js for the resolver the write paths use.
+ *
+ * The explanation lives out here rather than inside the template literal below:
+ * everything in that literal is shipped to the browser on every single call,
+ * and this comment alone was 700 bytes of prose per evaluate.
+ */
 export async function getState({ _deps } = {}) {
   const { evaluate } = _resolve(_deps);
   const state = await evaluate(`
@@ -35,8 +56,29 @@ export async function getState({ _deps } = {}) {
       var studies = [];
       try {
         var allStudies = chart.getAllStudies();
+        // See the note above getState(): a Pine study's id does not survive
+        // serialization, so it is reported as null with a name to use instead.
+        var dsByDesc = {};
+        try {
+          var srcs = chart._chartWidget.model().model().dataSources();
+          for (var d = 0; d < srcs.length; d++) {
+            try {
+              var mi = srcs[d].metaInfo && srcs[d].metaInfo();
+              if (mi && mi.description) dsByDesc[mi.description] = mi;
+            } catch (e2) {}
+          }
+        } catch (e2) {}
         studies = allStudies.map(function(s) {
-          return { id: s.id, name: s.name || s.title || 'unknown' };
+          var usable = (typeof s.id === 'string' && s.id.length > 0);
+          var name = s.name || s.title || 'unknown';
+          var out = { id: usable ? s.id : null, name: name };
+          if (!usable) {
+            out.addressable_by = 'name';
+            out.id_note = 'TradingView gives this study no serializable id (Pine). Pass its name as entity_id.';
+            var mi2 = dsByDesc[name];
+            if (mi2 && mi2.id) out.script_id = String(mi2.id);
+          }
+          return out;
         });
       } catch(e) {}
       return {
@@ -149,13 +191,45 @@ export async function manageIndicator({ action, indicator, entity_id, inputs: in
     return { success: true, action: 'add', indicator, entity_id: newIds[0], new_study_count: newIds.length };
   } else if (action === 'remove') {
     if (!entity_id) throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'entity_id required for remove action. Use chart_get_state to find study IDs.');
-    await evaluate(`
+    // REMOVE USED TO RETURN A HARDCODED SUCCESS. It called removeEntity() and
+    // said `success: true` without looking, so a typo'd id, a Pine study whose
+    // id cannot be serialized, or a throw inside the page all reported the same
+    // thing as a real removal. Count before, count after, and say which study
+    // actually went.
+    const removal = await evaluate(`
       (function() {
         var chart = ${CHART_API};
-        chart.removeEntity(${safeString(entity_id)});
+        ${STUDY_RESOLVER_JS()}
+        var before = chart.getAllStudies().length;
+        var r = __tvResolveStudy(chart, ${safeString(entity_id)});
+        if (r.error) return { error: r.error };
+        var name = r.resolved_name;
+        try { chart.removeEntity(r.handle); } catch (e) { return { error: 'removeEntity threw: ' + e.message }; }
+        var after = chart.getAllStudies().length;
+        return { before: before, after: after, removed_name: name };
       })()
     `);
-    return { success: true, action: 'remove', entity_id };
+    if (!removal) {
+      throw new ClassifiedError(CATEGORIES.API_UNEXPECTED,
+        `Could not confirm removal of ${entity_id}: the page returned nothing.`);
+    }
+    if (removal.error) {
+      throw new ClassifiedError(
+        /no study matched/i.test(removal.error) ? CATEGORIES.STUDY_NOT_FOUND : CATEGORIES.API_UNEXPECTED,
+        removal.error);
+    }
+    if (removal.after >= removal.before) {
+      throw new ClassifiedError(CATEGORIES.TV_UI_CHANGED,
+        `removeEntity was called for "${removal.removed_name}" but the chart still has ${removal.after} studies (was ${removal.before}). Nothing was removed.`);
+    }
+    return {
+      success: true,
+      action: 'remove',
+      entity_id,
+      removed_name: removal.removed_name,
+      study_count_before: removal.before,
+      study_count_after: removal.after,
+    };
   } else {
     throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'action must be "add" or "remove"');
   }

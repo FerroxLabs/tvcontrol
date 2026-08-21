@@ -165,7 +165,9 @@ describe('snapshot()', () => {
     await snapshot({ name: 'single-eval-test', _deps, _snapshots_dir: dir });
 
     // Count calls that contain getStudyById — should be exactly 1 (the batch call)
-    const studyByIdCalls = evaluateCalls.filter(c => c.includes('getStudyById'));
+    // Match a CALL, not the word: this used to be a substring test and it
+    // started matching a code comment that merely mentioned getStudyById.
+    const studyByIdCalls = evaluateCalls.filter(c => /getStudyById\s*\(/.test(c));
     assert.equal(studyByIdCalls.length, 1, 'Should use a single evaluate for all study inputs');
   });
 
@@ -273,7 +275,7 @@ describe('snapshot()', () => {
     await snapshot({ name: 'batch-test', _deps, _snapshots_dir: dir });
     // The studies-batch expression is unique in calling getStudyById; chart.getState
     // does getAllStudies but not getStudyById. Verify exactly one batch call.
-    const batchCalls = evaluate.calls.filter(c => c.includes('getStudyById'));
+    const batchCalls = evaluate.calls.filter(c => /getStudyById\s*\(/.test(c));
     assert.equal(batchCalls.length, 1, 'studies fetched in exactly one batch evaluate');
     // The batch expression is static — no user-controlled strings injected
     const batchExpr = batchCalls[0];
