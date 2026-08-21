@@ -42,12 +42,35 @@ describe('layout_switch verification', () => {
   });
 
   it('THROWS when the chart never moved, instead of reporting a switch', () => {
-    assert.match(body, /if \(!moved\)[\s\S]{0,400}throw/,
+    assert.match(body, /if \(!moved\)[\s\S]*?throw new ClassifiedError/,
       'a switch that did not happen must not return success');
     assert.ok(!/return \{ success: true, layout: result\.name \|\| name, layout_id: result\.id, source: result\.source, action: 'switched', unsaved_changes_discarded: dismissed \};/.test(body),
       'the unconditional success return is back');
   });
 
+
+  it('reads the BEFORE state before firing the switch, not after', () => {
+    // Found independently by two external audits. beforeState used to be read
+    // AFTER the evaluateAsync that calls loadChartFromServer, which inverts the
+    // check: a fast cached switch completes in the gap so before === after, and
+    // a read taken during the teardown the switch just triggered returns null.
+    // Either way `moved` can never become true and a SUCCESSFUL switch throws
+    // "chart never changed", after which the caller retries and fires a second
+    // switch. The verification could only fail successes, never catch one.
+    const baselineAt = body.indexOf('const beforeState = await evaluate(');
+    const fireAt = body.indexOf('loadChartFromServer');
+    assert.ok(baselineAt !== -1, 'the baseline read is gone');
+    assert.ok(fireAt !== -1, 'the switch call is gone');
+    assert.ok(baselineAt < fireAt,
+      'beforeState must be captured BEFORE loadChartFromServer is fired, or the check is inverted');
+  });
+
+  it('reports an unconfirmed switch rather than a failed one when there was no baseline', () => {
+    assert.match(body, /if \(!beforeState\)[\s\S]*?verified: null/,
+      'a missing baseline is unproven, not failed');
+    assert.match(body, /NOT retried/,
+      'the response must say why it did not retry');
+  });
   it('does not discard unsaved chart work unless asked', () => {
     // It used to hunt every button for /open anyway|don't save|discard/i and
     // click it, deciding on the operator's behalf to bin their work.

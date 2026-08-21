@@ -1,7 +1,7 @@
 /**
  * Core health/discovery/launch logic.
  */
-import { getClient, getTargetInfo, evaluate, CDP_HOST, CDP_PORT } from '../connection.js';
+import { getClient, getTargetInfo, evaluate, CDP_HOST, CDP_PORT, _assertCdpAllowed } from '../connection.js';
 import { existsSync, cpSync, rmSync, readdirSync, mkdirSync, readFileSync, writeFileSync, renameSync, statSync, unlinkSync } from 'fs';
 import { execFileSync, spawn } from 'child_process';
 import { dirname, basename, join, win32 as pathWin32 } from 'path';
@@ -415,6 +415,12 @@ const WINDOWS_APPS_RE = /\\WindowsApps\\/i;
 async function _probeCdp(cdpPort) {
   const http = await import('http');
   return new Promise((resolve) => {
+    // Raw http.get bypasses fetchCdpResponse, so the offline guard never saw
+    // it. An external audit found three modules reaching the browser this way
+    // while connection.js claimed "any attempt to reach the browser throws
+    // immediately". The claim has to be true or it is worse than absent.
+    try { _assertCdpAllowed('health._probeCdp'); }
+    catch (err) { resolve(null); return; }
     const req = http.get(`http://${CDP_HOST}:${cdpPort}/json/version`, (res) => {
       let data = '';
       res.on('data', (chunk) => { data += chunk; });

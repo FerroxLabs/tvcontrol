@@ -185,9 +185,21 @@ export async function _acquireProcessConnectLock({
  * deleting the operator's annotations and rewriting the pane layout.
  *
  * Threading `_deps` fixes those two sites. This fixes the CLASS: when
- * TV_MCP_NO_CDP is set, any attempt to reach the browser throws immediately
- * and names itself, so the next escape is a red test rather than a lost
- * drawing. run_offline_tests.js sets it.
+ * TV_MCP_NO_CDP is set, an attempt to reach the browser throws immediately and
+ * names itself, so the next escape is a red test rather than a lost drawing.
+ * run_offline_tests.js sets it.
+ *
+ * THE GUARANTEE IS ONLY AS WIDE AS ITS CALL SITES, and the first version of
+ * this comment overstated it. An external audit found three modules reaching
+ * the browser without passing through here at all: tab.js and
+ * sweep_parallel.js open raw `CDP({...})` WebSockets, and health.js used a raw
+ * `http.get`. All three now call _assertCdpAllowed explicitly.
+ *
+ * So the rule for anyone adding a new path to the browser: if it does not go
+ * through getClient() or fetchCdpResponse(), it must call _assertCdpAllowed()
+ * itself. tests/hermetic_deps.test.js enumerates the raw call sites and fails
+ * when a new unguarded one appears, because a guarantee nothing checks is the
+ * same shape of lie this whole release is about.
  */
 export function _assertCdpAllowed(what) {
   if (process.env.TV_MCP_NO_CDP) {

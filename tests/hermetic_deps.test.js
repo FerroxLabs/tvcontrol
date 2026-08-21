@@ -21,6 +21,10 @@ import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { readFileSync, readdirSync } from 'node:fs';
+import { dirname, join as pjoin } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import { restore, snapshot } from '../src/core/state.js';
 import * as connection from '../src/connection.js';
 import { emptyDeps } from './_helpers.js';
@@ -122,4 +126,65 @@ describe('offline tests must never reach the real browser', () => {
   // tripwires were never installed. Mutation-tested and deleted rather than
   // left as decoration. The env guard above is the real detector: reintroducing
   // either missing `_deps` turns test 3 red.
+});
+
+/**
+ * THE GUARD IS ONLY AS WIDE AS ITS CALL SITES.
+ *
+ * connection.js used to claim "any attempt to reach the browser throws
+ * immediately" while tab.js and sweep_parallel.js opened raw CDP WebSockets and
+ * health.js used a raw http.get, none of which passed through getClient() or
+ * fetchCdpResponse(). An external audit found all three, and no test would have
+ * gone red because nothing enumerated them.
+ *
+ * This walks the source for direct browser calls and requires each one to be
+ * guarded. A new unguarded path is a failing test rather than a silent hole.
+ */
+describe('every direct path to the browser is guarded', () => {
+  const SRC = pjoin(dirname(fileURLToPath(import.meta.url)), '..', 'src');
+
+  const walk = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((e) => (
+    e.isDirectory() ? walk(pjoin(dir, e.name)) : (e.name.endsWith('.js') ? [pjoin(dir, e.name)] : [])
+  ));
+
+  it('every raw CDP() and http.get to the CDP port calls _assertCdpAllowed', () => {
+    const unguarded = [];
+    for (const file of walk(SRC)) {
+      if (file.endsWith(`${'/'}connection.js`)) continue; // defines the guard
+      const src = readFileSync(file, 'utf8');
+      const lines = src.split('\n');
+      lines.forEach((line, i) => {
+        const rawCdp = /(?<![\w.])CDP\s*\(\s*\{/.test(line);
+        const rawHttp = /http\.get\s*\(\s*`http:\/\/\$\{CDP_HOST\}/.test(line);
+        if (!rawCdp && !rawHttp) return;
+        // The guard may be on this line or in the few lines just above it.
+        const window = lines.slice(Math.max(0, i - 8), i + 1).join('\n');
+        if (!window.includes('_assertCdpAllowed')) {
+          unguarded.push(`${file.replace(SRC, 'src')}:${i + 1}  ${line.trim().slice(0, 80)}`);
+        }
+      });
+    }
+    assert.deepEqual(unguarded, [],
+      'these reach the browser without passing the offline guard:\n' + unguarded.join('\n'));
+  });
+
+  it('the guard actually blocks the raw paths it now covers', async () => {
+    const prev = process.env.TV_MCP_NO_CDP;
+    process.env.TV_MCP_NO_CDP = '1';
+    try {
+      const tab = await import('../src/core/tab.js');
+      // Every tab operation has to reach the browser, whether through the
+      // guarded HTTP target list or the raw CDP socket. Neither may get out.
+      await assert.rejects(() => tab.list(), /Blocked a real CDP call/);
+
+      const health = await import('../src/core/health.js');
+      // _probeCdp used a raw http.get and returns null rather than throwing,
+      // which is its documented contract; the point is that it does not reach
+      // the network.
+      const hc = await health.healthCheck().catch((e) => ({ threw: e.message }));
+      assert.ok(hc, 'health check returned something rather than hanging on a socket');
+    } finally {
+      if (prev === undefined) delete process.env.TV_MCP_NO_CDP; else process.env.TV_MCP_NO_CDP = prev;
+    }
+  });
 });

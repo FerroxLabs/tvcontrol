@@ -22,7 +22,7 @@
  */
 import CDP from 'chrome-remote-interface';
 import { ClassifiedError, CATEGORIES } from '../errors.js';
-import { CDP_HOST, CDP_PORT, fetchCdpResponse, _withConnectionTimeout } from '../connection.js';
+import { CDP_HOST, CDP_PORT, fetchCdpResponse, _withConnectionTimeout, _assertCdpAllowed } from '../connection.js';
 // Per-call ceiling for a worker's Runtime.evaluate. Mirrors
 // DEFAULT_EVAL_TIMEOUT_MS in connection.js — without it a hung backtest or a
 // navigation-in-flight inside a worker tab leaves the evaluate promise pending
@@ -93,7 +93,7 @@ class SweepWorker {
 
   async connect() {
     this.cdp = await _withConnectionTimeout(
-      CDP({ host: CDP_HOST, port: CDP_PORT, target: this.target_id }),
+      (_assertCdpAllowed('SweepWorker.connect'), CDP({ host: CDP_HOST, port: CDP_PORT, target: this.target_id })),
       10000,
       `worker ${this.id}: CDP connect`,
     );

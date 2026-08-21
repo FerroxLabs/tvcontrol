@@ -337,6 +337,30 @@ export async function layoutList({ limit = 50, offset = 0, include_details = fal
 
 export async function layoutSwitch({ name, discard_unsaved = false }) {
   const escaped = JSON.stringify(name);
+  // WHAT THE CHART LOOKED LIKE BEFORE, READ BEFORE ANYTHING IS FIRED.
+  //
+  // loadChartFromServer() is fire-and-forget: the in-page promise resolves the
+  // instant it is called, long before any chart has loaded. MEASURED
+  // 2026-08-21: switching a 2-pane BTCUSDT layout to "MarketOverview" (ES1! 1D)
+  // returned success:true TWICE while the chart never moved. So the switch has
+  // to be proved by comparing before and after.
+  //
+  // THIS READ USED TO HAPPEN AFTER THE SWITCH WAS FIRED, which inverted the
+  // whole check. Two independent audits found it. A fast cached switch
+  // completes in the gap and before === after, and a read taken during the
+  // teardown the switch just triggered returns null, and in both cases a
+  // SUCCESSFUL switch burns the full poll and throws "chart never changed".
+  // The caller then retries and fires a second switch, possibly into the
+  // unsaved-changes dialog, caused entirely by the verification.
+  const beforeState = await evaluate(`
+    (function() {
+      try {
+        var api = window.TradingViewApi._activeChartWidgetWV.value();
+        return { symbol: api._chartWidget.model().mainSeries().symbol(), res: api._chartWidget.model().mainSeries().interval() };
+      } catch (e) { return null; }
+    })()
+  `);
+
   const result = await evaluateAsync(`
     new Promise(function(resolve) {
       try {
@@ -357,20 +381,6 @@ export async function layoutSwitch({ name, discard_unsaved = false }) {
     })
   `);
   if (!result?.success) throw new ClassifiedError(CATEGORIES.TV_UI_CHANGED, result?.error || 'Unknown error switching layout');
-
-  // WHAT THE CHART LOOKED LIKE BEFORE, so the switch can be proved rather than
-  // assumed. loadChartFromServer() is fire-and-forget: the in-page promise
-  // resolves the instant it is called, long before any chart has loaded.
-  // MEASURED 2026-08-21: switching a 2-pane BTCUSDT layout to "MarketOverview"
-  // (ES1! 1D) returned success:true TWICE while the chart never moved.
-  const beforeState = await evaluate(`
-    (function() {
-      try {
-        var api = window.TradingViewApi._activeChartWidgetWV.value();
-        return { symbol: api._chartWidget.model().mainSeries().symbol(), res: api._chartWidget.model().mainSeries().interval() };
-      } catch (e) { return null; }
-    })()
-  `);
 
   // THE UNSAVED-CHANGES DIALOG IS A DECISION, NOT A NUISANCE.
   //
@@ -448,9 +458,29 @@ export async function layoutSwitch({ name, discard_unsaved = false }) {
   }
 
   if (!moved) {
+    // NO BASELINE MEANS UNPROVEN, NOT FAILED.
+    //
+    // If the pre-switch read came back null we never had anything to compare
+    // against, so `moved` can never become true and a perfectly good switch
+    // would be reported as a failure. The caller then retries and fires a
+    // SECOND switch. Say it is unconfirmed instead, and let the caller look.
+    if (!beforeState) {
+      return {
+        success: true,
+        layout: result.name || name,
+        method: result.method,
+        id: result.id,
+        verified: null,
+        verify_note: 'The chart state could not be read before the switch, so there was no baseline to '
+          + 'compare against and the switch could not be confirmed either way. It was NOT retried, '
+          + 'because retrying an unconfirmed switch can fire a second one. Run chart_get_state to see '
+          + 'where the chart actually is.',
+        ...(afterState ? { current: afterState } : {}),
+      };
+    }
     throw new ClassifiedError(
       CATEGORIES.API_UNEXPECTED,
-      `loadChartFromServer was called for "${result.name || name}" but the chart never changed (still ${beforeState?.symbol || 'unknown'} ${beforeState?.res || ''})`,
+      `loadChartFromServer was called for "${result.name || name}" but the chart never changed (still ${beforeState.symbol || 'unknown'} ${beforeState.res || ''})`,
       {
         hint: 'If that layout genuinely uses the symbol and timeframe already on screen, the switch cannot be distinguished from a no-op. Otherwise the layout id may be stale: re-run layout_list.',
         details: { before: beforeState, after: afterState },

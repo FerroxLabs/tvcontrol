@@ -181,8 +181,15 @@ export async function getState({ _deps } = {}) {
   // Surface the failure that otherwise costs someone their whole layout.
   const broken = [];
   const poisoned = (out.studies || []).filter((st) => st.id === null && st.addressable_by === 'name');
-  if (_session && !_session.id) broken.push('this pane has no live data session, so it cannot load bars');
-  if (_session && _session.resolved === false) broken.push(`the symbol ${out.symbol} never resolved`);
+  const sessionDead = !!_session && !_session.id;
+  if (sessionDead) broken.push('this pane has no live data session, so it cannot load bars');
+  // An unresolved symbol is transiently normal on every symbol change. It only
+  // means damage when there is no session to resolve it with. Reporting it
+  // otherwise pushes the caller toward tv_repair_chart, which deletes studies.
+  // Same rule as core/session_health.js, so the two cannot disagree.
+  if (_session && _session.resolved === false && sessionDead) {
+    broken.push(`the symbol ${out.symbol} never resolved, and there is no session to resolve it with`);
+  }
   if (poisoned.length > 0) {
     broken.push(
       `${poisoned.length} stud${poisoned.length === 1 ? 'y has' : 'ies have'} no server id ` +
@@ -190,7 +197,14 @@ export async function getState({ _deps } = {}) {
       'session every time it reconnects',
     );
   }
-  if (broken.length > 0) {
+  if (broken.length === 0 && _session && _session.resolved === false) {
+    out.chart_health = {
+      healthy: true,
+      loading: true,
+      note: `${out.symbol} has not resolved yet, but this pane has a live session. That is a normal `
+        + 'mid-load state, not damage. Re-read in a moment.',
+    };
+  } else if (broken.length > 0) {
     out.chart_health = {
       healthy: false,
       problems: broken,

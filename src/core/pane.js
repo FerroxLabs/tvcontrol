@@ -142,7 +142,15 @@ async function _paneSymbols(deps) {
   }
   const map = {};
   for (const r of rows) {
-    map[r.index] = { symbol: r.symbol, resolved: !!r.resolved, resolved_name: r.resolved_name ?? null };
+    map[r.index] = {
+      symbol: r.symbol,
+      resolved: !!r.resolved,
+      resolved_name: r.resolved_name ?? null,
+      // Captured one line earlier and then thrown away, so a pane whose
+      // internals changed reported as "unreadable" with the real exception
+      // deleted. Keep it.
+      ...(r.error ? { read_error: r.error } : {}),
+    };
   }
   return map;
 }
@@ -405,9 +413,21 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
     // THE one that was asked for: during a change the label flips first while
     // symbolInfo still holds the previous instrument, and checking only that it
     // is non-null reports the old symbol's resolution as the new one's.
-    if (symbolMatches(after[idx].symbol, cleanSymbol)
-        && after[idx].resolved
-        && symbolMatches(after[idx].resolved_name, cleanSymbol)) { matched = true; break; }
+    // after[idx] can be absent: a setLayout or a pane collapse during the poll
+    // removes the pane out from under us. Without the guard that is a raw
+    // TypeError escaping a function that otherwise keeps its error taxonomy,
+    // and the failure path below already uses ?. for the same reason.
+    const row = after[idx];
+    if (!row) {
+      throw new ClassifiedError(
+        CATEGORIES.TV_UI_CHANGED,
+        `Pane ${idx} disappeared while waiting for "${cleanSymbol}" to load. The layout changed underneath this call.`,
+        { hint: 'Run pane_list to see the current layout before retrying.' },
+      );
+    }
+    if (symbolMatches(row.symbol, cleanSymbol)
+        && row.resolved
+        && symbolMatches(row.resolved_name, cleanSymbol)) { matched = true; break; }
   }
 
   // Say what moved that should not have, whether or not the target took. A
@@ -440,7 +460,8 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
           ? `Pane ${idx} now reads "${after[idx].symbol}" but the symbol never RESOLVED after ${secs}s: ` +
             'the chart has the label without the instrument.'
           : `Set pane ${idx} to "${cleanSymbol}" but after ${secs}s it still reads ` +
-            `"${after[idx]?.symbol ?? 'unreadable'}".`,
+            `"${after[idx]?.symbol ?? 'unreadable'}"` +
+            `${after[idx]?.read_error ? ` (reading it threw: ${after[idx].read_error})` : ''}.`,
       {
         hint: labelOk
           ? 'A pane with a label but no resolved symbol is the stuck-on-reconnect state. Run tv_chart_health.'

@@ -127,9 +127,37 @@ export async function inspect({ _deps } = {}) {
           for (var k = 0; k < srcs.length; k++) {
             try {
               var src = srcs[k];
-              if (!src.metaInfo) continue;
-              var mi = src.metaInfo();
-              if (!mi || !mi.description) continue;
+              // A STUDY WITH NO metaInfo IS THE MOST DAMAGED CASE, AND THIS
+              // USED TO SKIP IT.
+              //
+              // Registration failing half way is exactly where a
+              // half-constructed source is plausible, so skipping anything
+              // without metaInfo or a description made the tool blind to the
+              // worst instances of the failure it exists to find. It also made
+              // the tools contradict each other: chart_get_state would say
+              // "run tv_repair_chart" while tv_chart_health said healthy and
+              // the repair said nothing_to_repair.
+              //
+              // Record it with a synthetic name instead. Anonymous studies are
+              // reported so the operator knows they are there, and the repair
+              // addresses them by INDEX because they have no name to match on.
+              var mi = null;
+              try { mi = src.metaInfo ? src.metaInfo() : null; } catch (e) { mi = null; }
+              var described = !!(mi && mi.description);
+              if (!described) {
+                var anonId = null;
+                try { anonId = (typeof src.id === 'function') ? src.id() : null; } catch (e) {}
+                p.studies.push({
+                  name: null,
+                  source_index: k,
+                  id: (typeof anonId === 'string' && anonId.length > 0) ? anonId : null,
+                  pine: false,
+                  script_id: null,
+                  anonymous: true,
+                  anonymous_reason: mi ? 'the source reports no description' : 'the source reports no metaInfo'
+                });
+                continue;
+              }
               // NEVER OFFER TRADINGVIEW'S OWN SOURCES FOR REMOVAL.
               // Dividends, splits, earnings and the continuous-contract roll
               // date calculator are attached to every chart and are not user
@@ -177,16 +205,38 @@ export async function inspect({ _deps } = {}) {
     if (poisoned.length > 0) {
       problems.push(
         `${poisoned.length} stud${poisoned.length === 1 ? 'y has' : 'ies have'} no usable id ` +
-        `(${poisoned.map((s) => JSON.stringify(s.name)).join(', ')}). Each one kills this pane's ` +
-        'chart session every time it reconnects.',
+        `(${poisoned.map((s) => (s.name === null ? `source #${s.source_index}` : JSON.stringify(s.name))).join(', ')}). ` +
+        `Each one kills this pane's chart session every time it reconnects.`,
       );
     }
     if (sessionDead) problems.push('this pane has no live chart session, so it cannot load data');
-    if (p.symbol_resolved === false) problems.push(`symbol ${p.symbol} never resolved`);
+
+    // AN UNRESOLVED SYMBOL IS NOT DAMAGE ON ITS OWN.
+    //
+    // symbolInfo() is transiently null between setSymbol and resolution
+    // completing, which happens on every normal symbol change. Reporting that
+    // as broken made a healthy mid-load pane look damaged and pushed the
+    // operator toward tv_repair_chart, which DELETES STUDIES. A false positive
+    // that recommends a destructive tool is worse than no check at all.
+    //
+    // Measured on the real failure: the broken pane had session_id "", state 0
+    // AND symbolInfo null. A pane that is merely loading still has its session.
+    // So the session is the discriminator, not the symbol.
+    const merelyLoading = p.symbol_resolved === false && !sessionDead;
+    if (p.symbol_resolved === false && sessionDead) {
+      problems.push(`symbol ${p.symbol} never resolved, and this pane has no session to resolve it with`);
+    }
     return {
       ...p,
-      poisoned_studies: poisoned.map((s) => s.name),
+      poisoned_studies: poisoned.map((s) => s.name).filter((n) => n !== null),
+      anonymous_poisoned: poisoned.filter((s) => s.name === null).map((s) => s.source_index),
       healthy: problems.length === 0,
+      // Said out loud so a caller can tell "wait a moment" from "act".
+      ...(merelyLoading ? {
+        loading: true,
+        loading_note: `${p.symbol} has not resolved yet, but this pane still has a live session. `
+          + 'That is a normal mid-load state, not damage. Re-read in a moment.',
+      } : {}),
       problems,
     };
   });
@@ -224,7 +274,7 @@ export async function repair({ pane = null, dry_run = false, _deps } = {}) {
   const before = await inspect({ _deps });
 
   const targets = before.panes.filter((p) => (pane === null || p.index === pane)
-    && p.poisoned_studies.length > 0);
+    && (p.poisoned_studies.length > 0 || (p.anonymous_poisoned || []).length > 0));
 
   if (pane !== null && !before.panes.some((p) => p.index === pane)) {
     throw new ClassifiedError(
@@ -246,7 +296,12 @@ export async function repair({ pane = null, dry_run = false, _deps } = {}) {
     };
   }
 
-  const plan = targets.map((p) => ({ pane: p.index, remove: p.poisoned_studies }));
+  const plan = targets.map((p) => ({
+    pane: p.index,
+    remove: p.poisoned_studies,
+    ...((p.anonymous_poisoned || []).length > 0
+      ? { remove_anonymous_sources: p.anonymous_poisoned } : {}),
+  }));
   if (dry_run) {
     return { success: true, action: 'dry_run', plan, problems: before.problems };
   }
@@ -297,6 +352,39 @@ export async function repair({ pane = null, dry_run = false, _deps } = {}) {
       removed.push({
         pane: target.index,
         study: name,
+        removed: !!(r && r.removed),
+        ...(r && r.reason ? { reason: r.reason } : {}),
+      });
+    }
+
+    // A study with no metaInfo has no name to match on, so address it by its
+    // position in dataSources(). Re-read the index inside the page rather than
+    // trusting the one from inspect(): sources may have shifted since.
+    for (const srcIndex of (target.anonymous_poisoned || [])) {
+      const r = await evaluate(`
+        (function() {
+          var mm = ${CWC}.getAll()[${target.index}].model().model();
+          var srcs = mm.dataSources();
+          var src = srcs[${Number(srcIndex)}];
+          if (!src) return { removed: false, reason: 'source index ' + ${Number(srcIndex)} + ' no longer exists' };
+          // Re-confirm it is still anonymous AND still has no id before
+          // deleting it. If it acquired either since inspect(), it is not the
+          // thing we meant to remove.
+          var mi = null;
+          try { mi = src.metaInfo ? src.metaInfo() : null; } catch (e) { mi = null; }
+          if (mi && mi.description) return { removed: false, reason: 'source ' + ${Number(srcIndex)} + ' now has a description; it is no longer the anonymous source that was found' };
+          var idv = null;
+          try { idv = (typeof src.id === 'function') ? src.id() : null; } catch (e) {}
+          if (typeof idv === 'string' && idv.length > 0) return { removed: false, reason: 'source ' + ${Number(srcIndex)} + ' has registered since; leaving it alone' };
+          var beforeN = srcs.length;
+          try { mm.removeSource(src); } catch (e) { return { removed: false, reason: 'removeSource threw: ' + e.message }; }
+          return { removed: mm.dataSources().length < beforeN };
+        })()
+      `);
+      removed.push({
+        pane: target.index,
+        study: `anonymous source #${srcIndex}`,
+        anonymous: true,
         removed: !!(r && r.removed),
         ...(r && r.reason ? { reason: r.reason } : {}),
       });

@@ -275,6 +275,31 @@ describe('pane management', () => {
     assert.deepEqual(page.state.symbols, ['NASDAQ:AAPL', 'NASDAQ:NVDA'], 'nothing was written');
   });
 
+  it('classifies a pane that vanishes mid-poll instead of throwing a raw TypeError', async () => {
+    // Caught by an external audit. The poll read after[idx].symbol with no
+    // optional chaining while the failure path four lines later used ?., so a
+    // setLayout or pane collapse during the 5s poll escaped as an unclassified
+    // TypeError from a function that otherwise keeps its error taxonomy.
+    const page = mockPage({ symbols: ['NASDAQ:AAPL', 'NASDAQ:NVDA'], active: 0 });
+    let reads = 0;
+    const real = page._deps.evaluate;
+    page._deps.evaluate = async (expr) => {
+      if (expr.includes('mainSeries()') && expr.includes('out.push')) {
+        reads += 1;
+        // The first read is the "before" snapshot; the layout collapses after.
+        if (reads > 1) return [];
+      }
+      return real(expr);
+    };
+    await assert.rejects(
+      setSymbol({ index: 1, symbol: 'NASDAQ:TSLA', _deps: page._deps }),
+      (err) => err instanceof ClassifiedError
+        && err.category === CATEGORIES.TV_UI_CHANGED
+        && /Pane 1 disappeared while waiting/.test(err.message)
+        && /layout changed underneath/.test(err.message),
+    );
+  });
+
   it('rejects an out-of-range pane before touching anything', async () => {
     const page = mockPage({ symbols: ['NASDAQ:AAPL', 'NASDAQ:NVDA'] });
     await assert.rejects(

@@ -57,7 +57,11 @@ function mockCharts(panes) {
           studies: p.studies
             // the page-side filter drops TradingView's own event sources
             .filter((s) => !String(s.sourceId || '').startsWith('ESD$'))
-            .map((s) => ({ name: s.name, id: s.id ?? null, pine: !!s.pine, script_id: s.scriptId || null })),
+            .map((s, k) => (s.anonymous
+              ? { name: null, source_index: k, id: s.id ?? null, pine: false,
+                  script_id: null, anonymous: true,
+                  anonymous_reason: 'the source reports no metaInfo' }
+              : { name: s.name, id: s.id ?? null, pine: !!s.pine, script_id: s.scriptId || null })),
         })),
       };
     }
@@ -163,6 +167,74 @@ describe('tv_chart_health finds the pane that cannot fix itself', () => {
   it('throws rather than guessing when the page returns nothing', async () => {
     const _deps = { evaluate: async () => undefined, evaluateAsync: async () => undefined, wait: async () => {} };
     await assert.rejects(() => inspect({ _deps }), /returned nothing usable/);
+  });
+});
+
+describe('a pane that is merely loading is not a pane that is broken', () => {
+  it('does NOT call an unresolved symbol damage while the session is alive', async () => {
+    // Caught by an external audit. symbolInfo() is transiently null between
+    // setSymbol and resolution completing, which happens on EVERY normal
+    // symbol change. Reporting that as broken pushed the operator toward
+    // tv_repair_chart, which deletes studies. A false positive that recommends
+    // a destructive tool is worse than no check at all.
+    const page = mockCharts([{
+      sessionId: 'cs_alive', state: 2, connected: true, resolved: false,
+      studies: [{ name: 'Volume', id: 'T4x6LH' }],
+    }]);
+    const r = await inspect({ _deps: page._deps });
+    assert.equal(r.healthy, true, 'mid-load is not damage');
+    assert.deepEqual(r.problems, []);
+    assert.equal(r.panes[0].loading, true);
+    assert.match(r.panes[0].loading_note, /normal mid-load state, not damage/);
+  });
+
+  it('DOES call it damage when there is no session to resolve it with', async () => {
+    const page = mockCharts([{
+      sessionId: '', state: 0, connected: false, resolved: false,
+      studies: [{ name: 'Volume', id: 'T4x6LH' }],
+    }]);
+    const r = await inspect({ _deps: page._deps });
+    assert.equal(r.healthy, false);
+    assert.match(r.problems.join(' '), /no session to resolve it with/);
+    assert.equal(r.panes[0].loading, undefined);
+  });
+
+  it('leaves a merely-loading pane alone', async () => {
+    const page = mockCharts([{
+      sessionId: 'cs_alive', state: 2, connected: true, resolved: false,
+      studies: [{ name: 'Volume', id: 'T4x6LH' }],
+    }]);
+    const r = await repair({ _deps: page._deps });
+    assert.equal(r.action, 'nothing_to_repair');
+    assert.deepEqual(page.calls.removed, []);
+  });
+});
+
+describe('a study with no metaInfo is the most damaged case, not one to skip', () => {
+  it('reports an anonymous source with no id instead of ignoring it', async () => {
+    // Caught by an external audit. inspect() skipped any source without
+    // metaInfo or a description, which is exactly where a half-constructed
+    // source is plausible. The result was chart_get_state saying "run
+    // tv_repair_chart" while tv_chart_health said healthy and the repair said
+    // nothing_to_repair: the two tools disagreeing about the one failure both
+    // exist for.
+    const page = mockCharts([{
+      sessionId: '', state: 0, connected: false, resolved: false,
+      studies: [{ name: 'Volume', id: '363Hwd' }, { anonymous: true, id: null }],
+    }]);
+    const r = await inspect({ _deps: page._deps });
+    assert.equal(r.healthy, false);
+    assert.deepEqual(r.panes[0].anonymous_poisoned, [1]);
+    assert.match(r.problems.join(' '), /source #1/);
+  });
+
+  it('repairs it by index, because it has no name to match on', async () => {
+    const page = mockCharts([{
+      sessionId: '', state: 0, connected: false, resolved: false,
+      studies: [{ name: 'Volume', id: '363Hwd' }, { anonymous: true, id: null }],
+    }]);
+    const r = await repair({ dry_run: true, _deps: page._deps });
+    assert.deepEqual(r.plan, [{ pane: 0, remove: [], remove_anonymous_sources: [1] }]);
   });
 });
 

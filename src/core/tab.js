@@ -6,7 +6,7 @@
  * shell tab, so all visible tab mutations are driven through the shell DOM.
  */
 import CDP from 'chrome-remote-interface';
-import { CDP_HOST, CDP_PORT, reconnectToTarget, _fetchCdpJson, _withConnectionTimeout } from '../connection.js';
+import { _assertCdpAllowed, CDP_HOST, CDP_PORT, reconnectToTarget, _fetchCdpJson, _withConnectionTimeout } from '../connection.js';
 import { ClassifiedError, CATEGORIES } from '../errors.js';
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -23,7 +23,7 @@ async function _withTarget(targetId, fn) {
   let client;
   try {
     client = await _withConnectionTimeout(
-      CDP({ host: CDP_HOST, port: CDP_PORT, target: targetId }),
+      (_assertCdpAllowed('tab._withTarget'), CDP({ host: CDP_HOST, port: CDP_PORT, target: targetId })),
       10000,
       `CDP shell connection ${targetId}`,
     );
