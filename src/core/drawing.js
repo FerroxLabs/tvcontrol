@@ -122,6 +122,51 @@ export async function removeOne({ entity_id, _deps } = {}) {
 export async function clearAll({ _deps } = {}) {
   const { evaluate, getChartApi } = _resolve(_deps);
   const apiPath = await getChartApi();
+
+  // THE MOST DESTRUCTIVE TOOL IN THE SET RETURNED A HARDCODED SUCCESS.
+  // It called removeAllShapes() and returned { success: true } without ever
+  // looking. If the call threw inside the page, or the API path resolved to a
+  // detached widget, or nothing was there to begin with, the answer was
+  // identical: "all_shapes_removed". For an irreversible operation on a
+  // trader's annotations that is the worst possible place to guess.
+  //
+  // Count before, count after, and report what actually happened.
+  const before = await evaluate(`
+    (function() {
+      try { return ${apiPath}.getAllShapes().length; } catch (e) { return -1; }
+    })()
+  `);
+  if (before === -1) {
+    throw new ClassifiedError(
+      CATEGORIES.TV_UI_CHANGED,
+      'Could not count the drawings on the chart, so nothing was removed rather than deleting blind',
+      { hint: 'Run tv_health_check and confirm the chart has finished loading.' },
+    );
+  }
+  if (before === 0) {
+    return { success: true, action: 'nothing_to_remove', removed_count: 0, remaining: 0 };
+  }
+
   await evaluate(`${apiPath}.removeAllShapes()`);
-  return { success: true, action: 'all_shapes_removed' };
+
+  const after = await evaluate(`
+    (function() {
+      try { return ${apiPath}.getAllShapes().length; } catch (e) { return -1; }
+    })()
+  `);
+  if (after === -1) {
+    throw new ClassifiedError(
+      CATEGORIES.TV_UI_CHANGED,
+      `removeAllShapes() was called on ${before} drawing(s) but the result could not be read back, so the outcome is unconfirmed`,
+      { hint: 'Call draw_list to see the true current state.' },
+    );
+  }
+  if (after > 0) {
+    throw new ClassifiedError(
+      CATEGORIES.API_UNEXPECTED,
+      `removeAllShapes() was accepted but ${after} of ${before} drawing(s) are still on the chart`,
+      { hint: 'Retry once, or remove the remainder individually with draw_remove_one.' },
+    );
+  }
+  return { success: true, action: 'all_shapes_removed', removed_count: before, remaining: 0, verified: true };
 }

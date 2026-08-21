@@ -49,10 +49,11 @@ export function registerUiTools(server) {
     catch (err) { return errorResult(err); }
   });
 
-  server.tool('ui_type_text', 'Type text into the currently focused input/textarea element', {
+  server.tool('ui_type_text', 'Type text into the currently focused input/textarea element. Refuses when nothing is focused or the focused element cannot accept text, and reports which element received the characters.', {
     text: z.string().describe('Text to type into the focused element'),
-  }, async ({ text }) => {
-    try { return jsonResult(await core.typeText({ text })); }
+    expect_focus: z.string().optional().describe('Pin the target: the focused element tag or name must contain this, otherwise nothing is typed. Use when it matters which field receives the text.'),
+  }, async ({ text, expect_focus }) => {
+    try { return jsonResult(await core.typeText({ text, expect_focus })); }
     catch (err) { return errorResult(err); }
   });
 

@@ -194,14 +194,25 @@ export async function setInputs({ entity_id, inputs: inputsRaw, _deps } = {}) {
       var currentInputs = study.getInputValues();
       var overrides = ${inputsJson};
       var updatedKeys = {};
+      var availableIds = [];
       for (var i = 0; i < currentInputs.length; i++) {
+        availableIds.push(currentInputs[i].id);
         if (overrides.hasOwnProperty(currentInputs[i].id)) {
           currentInputs[i].value = overrides[currentInputs[i].id];
           updatedKeys[currentInputs[i].id] = overrides[currentInputs[i].id];
         }
       }
       study.setInputValues(currentInputs);
-      return { updated_inputs: updatedKeys };
+      // READ BACK. setInputValues() returning is not evidence the study took
+      // the value, and a study can silently clamp or reject one.
+      var after = {};
+      try {
+        var reread = study.getInputValues();
+        for (var j = 0; j < reread.length; j++) {
+          if (updatedKeys.hasOwnProperty(reread[j].id)) after[reread[j].id] = reread[j].value;
+        }
+      } catch (e) {}
+      return { updated_inputs: updatedKeys, available_ids: availableIds, after: after };
     })()
   `);
 
@@ -209,22 +220,66 @@ export async function setInputs({ entity_id, inputs: inputsRaw, _deps } = {}) {
     const isMissing = /not found/i.test(String(result.error));
     throw new ClassifiedError(isMissing ? CATEGORIES.STUDY_NOT_FOUND : CATEGORIES.API_UNEXPECTED, result.error);
   }
-  return { success: true, entity_id, updated_inputs: result.updated_inputs };
+  // NONE OF THE REQUESTED KEYS MATCHED AN INPUT ON THIS STUDY.
+  // The loop only assigns where an input id equals a key you passed, so a
+  // mismatch produced updated_inputs:{} and this returned success:true having
+  // changed absolutely nothing. Study input ids are frequently not the friendly
+  // name ("in_0", "length_1"), so this is the common case, not the rare one.
+  const updated = result?.updated_inputs || {};
+  const requested = Object.keys(inputs);
+  const matched = Object.keys(updated);
+  if (matched.length === 0) {
+    throw new ClassifiedError(
+      CATEGORIES.INVALID_ARGUMENT,
+      `None of the requested inputs (${requested.join(', ')}) exist on this study, so nothing was changed`,
+      {
+        hint: `This study's input ids are: ${(result?.available_ids || []).join(', ') || '(none reported)'}. Call data_get_indicator with this entity_id to see them with their current values.`,
+        details: { requested, available: result?.available_ids || [] },
+      },
+    );
+  }
+
+  // Partial match, and a value the study did not actually take, are both worth
+  // saying out loud rather than folding into a flat success.
+  const unmatched = requested.filter((k) => !matched.includes(k));
+  const after = result?.after || {};
+  const rejected = matched.filter((k) => after[k] !== undefined && String(after[k]) !== String(updated[k]));
+
+  return {
+    success: unmatched.length === 0 && rejected.length === 0,
+    entity_id,
+    updated_inputs: updated,
+    applied: after,
+    ...(unmatched.length ? { not_found: unmatched, available_ids: result?.available_ids || [] } : {}),
+    ...(rejected.length ? { rejected_by_study: rejected.map((k) => ({ id: k, requested: updated[k], actual: after[k] })) } : {}),
+    ...(unmatched.length || rejected.length
+      ? { error: `${unmatched.length} input(s) did not exist and ${rejected.length} were changed by the study` }
+      : {}),
+    verified: rejected.length === 0,
+  };
 }
 
 export async function toggleVisibility({ entity_id, visible, _deps } = {}) {
   const deps = _resolve(_deps);
   if (!entity_id) throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'entity_id is required. Use chart_get_state to find study IDs.');
-  if (typeof visible !== 'boolean') throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'visible must be a boolean (true or false)');
+  // It is called toggleVisibility and it demanded an explicit boolean, so the
+  // obvious call — "flip this study" — failed with an argument error. Omitting
+  // visible now does what the name says: read the current state and invert it.
+  if (visible !== undefined && typeof visible !== 'boolean') {
+    throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'visible must be a boolean (true or false), or omitted to flip the current state');
+  }
 
   const result = await deps.evaluate(`
     (function() {
       var chart = ${CHART_API};
       var study = chart.getStudyById(${safeString(entity_id)});
       if (!study) return { error: 'Study not found: ' + ${safeString(entity_id)} };
-      study.setVisible(${visible});
+      var was = study.isVisible();
+      var want = ${visible === undefined ? '!was' : String(visible)};
+      study.setVisible(want);
+      // The read-back is the evidence: setVisible() returning proves nothing.
       var actualVisible = study.isVisible();
-      return { visible: actualVisible };
+      return { visible: actualVisible, was: was, wanted: want };
     })()
   `);
 
@@ -232,5 +287,13 @@ export async function toggleVisibility({ entity_id, visible, _deps } = {}) {
     const isMissing = /not found/i.test(String(result.error));
     throw new ClassifiedError(isMissing ? CATEGORIES.STUDY_NOT_FOUND : CATEGORIES.API_UNEXPECTED, result.error);
   }
-  return { success: true, entity_id, visible: result.visible };
+  // The study can refuse: setVisible() is a request, isVisible() is the answer.
+  if (result.wanted !== undefined && result.visible !== result.wanted) {
+    throw new ClassifiedError(
+      CATEGORIES.API_UNEXPECTED,
+      `setVisible(${result.wanted}) was accepted but the study is still ${result.visible ? 'visible' : 'hidden'}`,
+      { hint: 'Retry once; if it persists the study may be locked or on a pane that is itself hidden.' },
+    );
+  }
+  return { success: true, entity_id, visible: result.visible, was: result.was, changed: result.was !== result.visible, verified: true };
 }

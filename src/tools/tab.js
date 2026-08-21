@@ -16,8 +16,10 @@ export function registerTabTools(server) {
     catch (err) { return errorResult(err); }
   });
 
-  server.tool('tab_close', 'Close the current chart tab', {}, async () => {
-    try { return jsonResult(await core.closeTab()); }
+  server.tool('tab_close', 'Close the currently active chart tab. Names the tab it is about to close and refuses when no tab is marked active. Closing a chart tab cannot be undone through this API, so pass expect_title when it matters which one goes.', {
+    expect_title: z.string().optional().describe('The active tab title must contain this, otherwise nothing is closed. Use tab_list first to see the titles.'),
+  }, async ({ expect_title }) => {
+    try { return jsonResult(await core.closeTab({ expect_title })); }
     catch (err) { return errorResult(err); }
   });
 

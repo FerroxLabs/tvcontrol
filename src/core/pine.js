@@ -58,7 +58,12 @@ const FIND_MONACO = `
     }
     if (!fiberKey) return null;
     var current = el[fiberKey];
-    for (var d = 0; d < 15; d++) {
+    // MEASURED 2026-08-21 on TradingView Desktop 3.3.0 / Chrome 140: monacoEnv
+    // sits at hop 11 of this walk. A limit of 15 left four hops of headroom on
+    // the only build anyone has measured, and the failure mode is a flat
+    // "Monaco not found in React fiber tree" that reads like the editor is
+    // closed. The walk is cheap; the margin is not.
+    for (var d = 0; d < 40; d++) {
       if (!current) break;
       if (current.memoizedProps && current.memoizedProps.value && current.memoizedProps.value.monacoEnv) {
         var env = current.memoizedProps.value.monacoEnv;

@@ -15,10 +15,11 @@ export function registerReplayTools(server) {
     catch (err) { return errorResult(err); }
   });
 
-  server.tool('replay_autoplay', 'Toggle autoplay in replay mode, optionally set speed', {
-    speed: z.coerce.number().optional().describe('Autoplay delay in ms (lower = faster). Valid values: 100, 143, 200, 300, 1000, 2000, 3000, 5000, 10000. Leave empty to just toggle.'),
-  }, async ({ speed }) => {
-    try { return jsonResult(await core.autoplay({ speed })); }
+  server.tool('replay_autoplay', 'Turn autoplay on or off in replay mode, optionally setting the speed. Pass enabled to say which state you want; omit it to flip whatever the current state is. Confirms the result by reading autoplay back.', {
+    speed: z.coerce.number().optional().describe('Autoplay delay in ms (lower = faster). Valid values: 100, 143, 200, 300, 1000, 2000, 3000, 5000, 10000. Note this is a DELAY, not a multiplier: 1 is rejected.'),
+    enabled: z.boolean().optional().describe('true to start autoplay, false to stop it. Omit to flip the current state.'),
+  }, async ({ speed, enabled }) => {
+    try { return jsonResult(await core.autoplay({ speed, enabled })); }
     catch (err) { return errorResult(err); }
   });
 

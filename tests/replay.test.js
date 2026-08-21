@@ -157,19 +157,47 @@ describe('step() — doStep and polling', () => {
 
 // ── autoplay() ───────────────────────────────────────────────────────────
 
+
+// A STATEFUL AUTOPLAY MOCK.
+//
+// autoplay() now reads isAutoplayStarted() BEFORE and AFTER, only toggles when
+// the current state differs from the target, and throws when the state it ends
+// on is not the one that was asked for. A mock that answers `true` to every
+// isAutoplayStarted() call cannot express a toggle at all: it says "already on"
+// before and "still on" after, so a request to turn autoplay OFF looks like a
+// failure. That is the mock being unable to model the thing, not the code.
+function autoplayDeps({ startsOn = false, delay = 1000, replayStarted = true, sticky = false } = {}) {
+  let on = startsOn;
+  let currentDelay = delay;
+  const calls = [];
+  const evaluate = async (expr) => {
+    calls.push(expr);
+    if (expr.includes('isReplayStarted')) return replayStarted;
+    if (expr.includes('changeAutoplayDelay')) {
+      const m = expr.match(/changeAutoplayDelay\((\d+)\)/);
+      if (m) currentDelay = Number(m[1]);
+      return undefined;
+    }
+    // `sticky` models a TradingView that refuses the flip, which is exactly the
+    // case the verification exists to catch.
+    if (expr.includes('toggleAutoplay')) { if (!sticky) on = !on; return undefined; }
+    if (expr.includes('isAutoplayStarted')) return on;
+    if (expr.includes('autoplayDelay')) return currentDelay;
+    return undefined;
+  };
+  evaluate.calls = calls;
+  return { _deps: { evaluate, getReplayApi: async () => 'RP' }, evaluate };
+}
+
 describe('autoplay() — delay validation', () => {
   for (const delay of VALID_AUTOPLAY_DELAYS) {
     it(`accepts valid delay ${delay}ms`, async () => {
-      const { _deps } = mockDeps({
-        'isReplayStarted': true,
-        'changeAutoplayDelay': undefined,
-        'toggleAutoplay': undefined,
-        'isAutoplayStarted': true,
-        'autoplayDelay': delay,
-      });
+      const { _deps } = autoplayDeps({ startsOn: false, delay });
       const result = await autoplay({ speed: delay, _deps });
       assert.equal(result.success, true);
       assert.equal(result.delay_ms, delay);
+      assert.equal(result.autoplay_active, true, 'omitting enabled flips the current state');
+      assert.equal(result.verified, true);
     });
   }
 
@@ -191,12 +219,7 @@ describe('autoplay() — delay validation', () => {
   }
 
   it('toggles without changing speed when speed is 0', async () => {
-    const { _deps, evaluate } = mockDeps({
-      'isReplayStarted': true,
-      'toggleAutoplay': undefined,
-      'isAutoplayStarted': true,
-      'autoplayDelay': 100,
-    });
+    const { _deps, evaluate } = autoplayDeps({ startsOn: false, delay: 100 });
     const result = await autoplay({ speed: 0, _deps });
     assert.equal(result.success, true);
     const changeCall = evaluate.calls.find(c => c.includes('changeAutoplayDelay'));
@@ -204,16 +227,42 @@ describe('autoplay() — delay validation', () => {
   });
 
   it('toggles without changing speed when speed omitted', async () => {
-    const { _deps, evaluate } = mockDeps({
-      'isReplayStarted': true,
-      'toggleAutoplay': undefined,
-      'isAutoplayStarted': false,
-      'autoplayDelay': 300,
-    });
+    const { _deps, evaluate } = autoplayDeps({ startsOn: true, delay: 300 });
     const result = await autoplay({ _deps });
-    assert.equal(result.autoplay_active, false);
-    const changeCall = evaluate.calls.find(c => c.includes('changeAutoplayDelay'));
+    assert.equal(result.autoplay_active, false, 'it was on, so omitting enabled turns it off');
+    assert.equal(result.was_active, true);
+    assert.equal(result.changed, true);
+    const changeCall = evaluate.calls.find((c) => c.includes('changeAutoplayDelay'));
     assert.equal(changeCall, undefined, 'changeAutoplayDelay not called when speed omitted');
+  });
+
+  it('turns autoplay OFF when asked, which was previously inexpressible', async () => {
+    // The old signature took only `speed` and always called toggleAutoplay(),
+    // so "stop autoplay" flipped it ON and then honestly reported
+    // autoplay_active:true for a call that meant the opposite.
+    const { _deps } = autoplayDeps({ startsOn: true });
+    const r = await autoplay({ enabled: false, _deps });
+    assert.equal(r.autoplay_active, false);
+    assert.equal(r.changed, true);
+  });
+
+  it('is a no-op when it is already in the requested state', async () => {
+    const { _deps, evaluate } = autoplayDeps({ startsOn: true });
+    const r = await autoplay({ enabled: true, _deps });
+    assert.equal(r.autoplay_active, true);
+    assert.equal(r.changed, false);
+    assert.equal(evaluate.calls.filter((c) => c.includes('toggleAutoplay')).length, 0,
+      'nothing to do, so nothing should have been toggled');
+  });
+
+  it('THROWS when the toggle is accepted but autoplay does not change', async () => {
+    // sticky:true models TradingView ignoring the flip. Reporting success here
+    // is the defect class this codebase exists to remove.
+    const { _deps } = autoplayDeps({ startsOn: false, sticky: true });
+    await assert.rejects(
+      () => autoplay({ enabled: true, _deps }),
+      (err) => /asked to be on but it is off/.test(err.message),
+    );
   });
 
   it('throws when replay not started', async () => {

@@ -507,6 +507,28 @@ export async function launch({ port, kill_existing, _deps } = {}) {
   const killFirst = kill_existing === true;
   const platform = deps.platform;
 
+  // ALREADY RUNNING IS NOT A REASON TO START ANOTHER ONE.
+  // There was no short-circuit here, so calling tv_launch against a healthy
+  // session spawned a SECOND TradingView. Two Desktop instances sharing one
+  // account is how layouts and Pine buffers end up fighting each other, and the
+  // caller almost never wanted it: they wanted "make sure it is up".
+  if (!killFirst) {
+    let alreadyUp = false;
+    try {
+      const probe = await deps.probeCdp(cdpPort);
+      alreadyUp = typeof probe === 'string' && probe.includes('Browser');
+    } catch { alreadyUp = false; }
+    if (alreadyUp) {
+      return {
+        success: true,
+        action: 'already_running',
+        cdp_port: cdpPort,
+        launched: false,
+        note: `TradingView is already answering on port ${cdpPort}, so nothing was started. Pass kill_existing:true to restart it deliberately.`,
+      };
+    }
+  }
+
   const pathMap = {
     darwin: [
       '/Applications/TradingView.app/Contents/MacOS/TradingView',

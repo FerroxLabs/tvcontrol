@@ -28,9 +28,9 @@ export function registerIndicatorTools(server) {
     catch (err) { return errorResult(err); }
   });
 
-  server.tool('indicator_toggle_visibility', 'Show or hide an indicator/study on the chart', {
+  server.tool('indicator_toggle_visibility', 'Show, hide, or flip an indicator on the chart. Omit visible to toggle. Confirms the result by reading the study back rather than trusting setVisible().', {
     entity_id: z.string().describe('Entity ID of the study (from chart_get_state)'),
-    visible: z.coerce.boolean().describe('true to show, false to hide'),
+    visible: z.boolean().optional().describe('true to show, false to hide. OMIT to flip whatever the current state is.'),
   }, async ({ entity_id, visible }) => {
     try { return jsonResult(await core.toggleVisibility({ entity_id, visible })); }
     catch (err) { return errorResult(err); }

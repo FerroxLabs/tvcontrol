@@ -105,7 +105,7 @@ export async function step({ _deps } = {}) {
   return { success: true, action: 'step', current_date: currentDate, advanced: true };
 }
 
-export async function autoplay({ speed, _deps } = {}) {
+export async function autoplay({ speed, enabled, _deps } = {}) {
   // Validate BEFORE any CDP calls — invalid values corrupt cloud account state permanently
   if (speed > 0 && !VALID_AUTOPLAY_DELAYS.includes(speed))
     throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, `Invalid autoplay delay ${speed}ms.`, { hint: `Valid values: ${VALID_AUTOPLAY_DELAYS.join(', ')}` });
@@ -117,10 +117,37 @@ export async function autoplay({ speed, _deps } = {}) {
   if (speed > 0) {
     await evaluate(`${rp}.changeAutoplayDelay(${speed})`);
   }
-  await evaluate(`${rp}.toggleAutoplay()`);
+
+  // This was a bare toggleAutoplay(), so "turn autoplay OFF" could not be
+  // expressed at all: asking for off flipped it ON, and the honest return then
+  // reported autoplay_active:true for a call that meant the opposite. Accept an
+  // explicit target and only toggle when it is not already there.
+  const wasOn = !!(await evaluate(wv(`${rp}.isAutoplayStarted()`)));
+  if (enabled !== undefined && typeof enabled !== 'boolean') {
+    throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'enabled must be a boolean (true or false), or omitted to flip the current state');
+  }
+  const want = enabled === undefined ? !wasOn : enabled;
+  if (wasOn !== want) {
+    await evaluate(`${rp}.toggleAutoplay()`);
+  }
+
   const isAutoplay = await evaluate(wv(`${rp}.isAutoplayStarted()`));
   const currentDelay = await evaluate(wv(`${rp}.autoplayDelay()`));
-  return { success: true, autoplay_active: !!isAutoplay, delay_ms: currentDelay };
+  if (!!isAutoplay !== want) {
+    throw new ClassifiedError(
+      CATEGORIES.API_UNEXPECTED,
+      `Autoplay was asked to be ${want ? 'on' : 'off'} but it is ${isAutoplay ? 'on' : 'off'}`,
+      { hint: 'Confirm replay is still running with replay_status, then retry.' },
+    );
+  }
+  return {
+    success: true,
+    autoplay_active: !!isAutoplay,
+    was_active: wasOn,
+    changed: wasOn !== !!isAutoplay,
+    delay_ms: currentDelay,
+    verified: true,
+  };
 }
 
 export async function stop({ _deps } = {}) {

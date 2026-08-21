@@ -14,12 +14,12 @@ export function registerDrawingTools(server) {
     catch (err) { return errorResult(err); }
   });
 
-  server.tool('draw_list', 'List all shapes/drawings on the chart', {}, async () => {
+  server.tool('draw_list', 'List shapes/drawings on the ACTIVE PANE ONLY. On a multi-pane layout the other panes are not included and a count of 0 does NOT mean the chart is empty: use pane_list to see every pane and pane_focus to switch.', {}, async () => {
     try { return jsonResult(await core.listDrawings()); }
     catch (err) { return errorResult(err); }
   });
 
-  server.tool('draw_clear', 'Remove ALL drawings from the chart. DESTRUCTIVE and there is no undo through this API: every trendline, level and annotation on the active chart is deleted, not just ones you added. Use draw_remove_one with an entity_id to remove a single drawing.', {}, async () => {
+  server.tool('draw_clear', 'Remove ALL drawings from the ACTIVE PANE. On a multi-pane layout this is NOT the whole chart: use pane_list to see the panes and pane_focus to pick one first. DESTRUCTIVE and there is no undo through this API: every trendline, level and annotation on the active chart is deleted, not just ones you added. Use draw_remove_one with an entity_id to remove a single drawing.', {}, async () => {
     try { return jsonResult(await core.clearAll()); }
     catch (err) { return errorResult(err); }
   });

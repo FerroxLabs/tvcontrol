@@ -66,14 +66,33 @@ describe('indicator settings and visibility', () => {
   });
 
   it('toggles visibility and returns the observed value', async () => {
+    // The observed value now comes back alongside what it WAS, so a caller can
+    // tell "already hidden, nothing to do" from "I hid it". setVisible() is a
+    // request; isVisible() is the answer.
     const result = await toggleVisibility({
       entity_id: 'study-1', visible: false,
-      _deps: { evaluate: async () => ({ visible: false }), wait: async () => {} },
+      _deps: { evaluate: async () => ({ visible: false, was: true, wanted: false }), wait: async () => {} },
     });
-    assert.deepEqual(result, { success: true, entity_id: 'study-1', visible: false });
+    assert.equal(result.success, true);
+    assert.equal(result.entity_id, 'study-1');
+    assert.equal(result.visible, false);
+    assert.equal(result.was, true);
+    assert.equal(result.changed, true);
+    assert.equal(result.verified, true);
   });
 
-  it('requires a boolean visibility value', async () => {
+  it('flips the current state when visible is omitted', async () => {
+    // Named toggleVisibility, it used to demand an explicit boolean, so the
+    // most obvious call failed with an argument error.
+    const result = await toggleVisibility({
+      entity_id: 'study-1',
+      _deps: { evaluate: async () => ({ visible: true, was: false, wanted: true }), wait: async () => {} },
+    });
+    assert.equal(result.success, true);
+    assert.equal(result.changed, true);
+  });
+
+  it('requires a boolean visibility value when one is given', async () => {
     await assert.rejects(
       toggleVisibility({ entity_id: 'study-1', visible: 'false', _deps: { evaluate: async () => {}, wait: async () => {} } }),
       (error) => error instanceof ClassifiedError && error.category === CATEGORIES.INVALID_ARGUMENT,

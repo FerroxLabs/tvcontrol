@@ -235,6 +235,29 @@ export async function openPanel({ panel, action }) {
 }
 
 export async function fullscreen() {
+  // "I clicked a button" was the entire evidence here, and the return said
+  // 'fullscreen_toggled' whether or not anything toggled. Read the state before
+  // and after so the answer describes the screen rather than the click. Callers
+  // also had no way to know which way it went, which makes restoring it after a
+  // test guesswork.
+  // MEASURED 2026-08-21: TradingView's chart fullscreen does NOT set
+  // document.fullscreenElement and does NOT change window.innerWidth — inside
+  // the Electron shell the window never resizes. What it actually does is hide
+  // the left drawing toolbar and the right widget bar. That is the signal.
+  const PANELS = `
+    (function(){
+      var right = document.querySelector('[class*="widgetbar"]') || document.querySelector('[data-name="right-toolbar"]');
+      var left  = document.querySelector('[class*="drawingToolbar"]') || document.querySelector('[data-name="drawing-toolbar"]');
+      var vis = function(el){
+        if (!el) return null;
+        var cs = getComputedStyle(el);
+        return cs.display !== 'none' && cs.visibility !== 'hidden' && el.getBoundingClientRect().width > 0;
+      };
+      return { fs: !!document.fullscreenElement, right: vis(right), left: vis(left) };
+    })()
+  `;
+  const before = await evaluate(PANELS);
+
   const result = await evaluate(`
     (function() {
       var btn = document.querySelector('[data-name="header-toolbar-fullscreen"]');
@@ -244,7 +267,29 @@ export async function fullscreen() {
     })()
   `);
   if (!result || !result.found) throw new ClassifiedError(CATEGORIES.TV_UI_CHANGED, 'Fullscreen button not found');
-  return { success: true, action: 'fullscreen_toggled' };
+
+  await new Promise((r) => setTimeout(r, 700));
+  const after = await evaluate(PANELS);
+
+  const changed = !!after && (after.left !== before?.left || after.right !== before?.right || after.fs !== before?.fs);
+  if (!changed) {
+    throw new ClassifiedError(
+      CATEGORIES.TV_UI_CHANGED,
+      'The fullscreen button was clicked but the toolbars did not change state',
+      { hint: 'The button may be disabled in this window state. Check the chart manually.' },
+    );
+  }
+  // Panels hidden IS fullscreen, whatever the browser fullscreen API says.
+  const wasFs = before?.left === false && before?.right === false;
+  const isFs = after.left === false && after.right === false;
+  return {
+    success: true,
+    action: 'fullscreen_toggled',
+    was_fullscreen: wasFs,
+    is_fullscreen: isFs,
+    toolbars: { before: { left: before?.left, right: before?.right }, after: { left: after.left, right: after.right } },
+    verified: true,
+  };
 }
 
 export async function layoutList({ limit = 50, offset = 0, include_details = false } = {}) {
@@ -403,13 +448,100 @@ export async function keyboard({ key, modifiers }) {
   return { success: true, key, modifiers: modifiers || [] };
 }
 
-export async function typeText({ text }) {
+export async function typeText({ text, expect_focus }) {
   const c = await getClient();
+
+  // THIS TYPES INTO WHATEVER HAPPENS TO HAVE FOCUS.
+  // It was Input.insertText() and an immediate { success: true }: no idea where
+  // the characters went, no check that anything was focused at all, and no
+  // read-back. In an application that also contains order tickets and a Pine
+  // editor holding 276 saved scripts, "I typed something somewhere" is not an
+  // acceptable answer. Name the target before and after.
+  const before = await evaluate(`
+    (function() {
+      var el = document.activeElement;
+      if (!el || el === document.body) return { focused: false };
+      return {
+        focused: true,
+        tag: el.tagName,
+        type: el.getAttribute('type') || null,
+        name: el.getAttribute('name') || el.getAttribute('data-name') || el.getAttribute('aria-label') || null,
+        editable: el.isContentEditable === true || /^(INPUT|TEXTAREA)$/.test(el.tagName),
+        value_len: typeof el.value === 'string' ? el.value.length : null
+      };
+    })()
+  `);
+
+  if (!before || !before.focused) {
+    throw new ClassifiedError(
+      CATEGORIES.TV_UI_CHANGED,
+      'Nothing has keyboard focus, so the text was not sent rather than being typed into an unknown target',
+      { hint: 'Click the field first with ui_click, then call ui_type_text.' },
+    );
+  }
+  if (!before.editable) {
+    throw new ClassifiedError(
+      CATEGORIES.TV_UI_CHANGED,
+      `The focused element is a <${before.tag}>${before.name ? ` (${before.name})` : ''}, which does not accept text, so nothing was typed`,
+      { hint: 'Focus an input, textarea or contenteditable field first with ui_click.' },
+    );
+  }
+  // Caller can pin the target so a mis-focused field is caught before typing.
+  if (expect_focus) {
+    const want = String(expect_focus).toLowerCase();
+    const got = `${before.tag} ${before.name || ''}`.toLowerCase();
+    if (!got.includes(want)) {
+      throw new ClassifiedError(
+        CATEGORIES.INVALID_ARGUMENT,
+        `Focus is on "${(before.name || before.tag)}" but expect_focus was "${expect_focus}", so nothing was typed`,
+        { hint: 'Focus the intended field first, or drop expect_focus if any focused field is acceptable.' },
+      );
+    }
+  }
+
   await c.Input.insertText({ text });
-  return { success: true, typed: text.substring(0, 100), length: text.length };
+
+  const after = await evaluate(`
+    (function() {
+      var el = document.activeElement;
+      if (!el) return { value_len: null };
+      return { value_len: typeof el.value === 'string' ? el.value.length : null, tag: el.tagName };
+    })()
+  `);
+  const grew = typeof before.value_len === 'number' && typeof after?.value_len === 'number'
+    ? after.value_len - before.value_len
+    : null;
+
+  return {
+    success: true,
+    typed: text.substring(0, 100),
+    length: text.length,
+    // Say WHERE it went. A caller that wanted the symbol box and hit the Pine
+    // editor should be able to see that from the response.
+    target: { tag: before.tag, name: before.name, type: before.type },
+    ...(grew === null
+      ? { verified: null, note: 'The focused element exposes no value to read back, so the text could not be confirmed.' }
+      : { verified: grew === text.length, chars_added: grew }),
+  };
 }
 
+const HOVER_STRATEGIES = ['aria-label', 'data-name', 'text', 'class-contains'];
+
 export async function hover({ by, value }) {
+  // An unsupported strategy used to fall through every branch and come back as
+  // "Element not found", which sends the caller hunting for a missing element
+  // when the real problem is that this function never looked. ui_find_element
+  // takes css; this does not.
+  if (!HOVER_STRATEGIES.includes(by)) {
+    throw new ClassifiedError(
+      CATEGORIES.INVALID_ARGUMENT,
+      `hover does not support the "${by}" strategy, so no element was searched for`,
+      { hint: `Use one of: ${HOVER_STRATEGIES.join(', ')}. For a CSS selector use ui_find_element instead.` },
+    );
+  }
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'value is required and must be a non-empty string');
+  }
   // Same attribute-equality-then-substring pattern as click() — no
   // in-page CSS string concatenation.
   const coords = await evaluate(`
@@ -492,7 +624,21 @@ export async function mouseClick({ x, y, button, double_click }) {
 }
 
 export async function findElement({ query, strategy }) {
+  // Without this, a missing query became the literal `undefined` inside the
+  // evaluated page source and blew up as "Cannot read properties of undefined
+  // (reading 'toLowerCase')" — a raw in-page TypeError for what is simply a
+  // missing argument.
+  if (typeof query !== 'string' || !query.trim()) {
+    throw new ClassifiedError(
+      CATEGORIES.INVALID_ARGUMENT,
+      'query is required and must be a non-empty string',
+      { hint: "Pass the text, aria-label or CSS selector to look for, e.g. { query: 'Watchlist', strategy: 'text' }." },
+    );
+  }
   const strat = strategy || 'text';
+  if (!['text', 'aria-label', 'css'].includes(strat)) {
+    throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, `strategy must be text, aria-label or css, got: ${strategy}`);
+  }
   const results = await evaluate(`
     (function() {
       var query = ${JSON.stringify(query)};
