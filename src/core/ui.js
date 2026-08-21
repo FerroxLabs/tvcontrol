@@ -280,9 +280,21 @@ export async function fullscreen() {
     );
   }
   // Panels hidden IS fullscreen, whatever the browser fullscreen API says.
+  // BOTH TOOLBARS HIDDEN IS NOT THE SAME AS FULLSCREEN.
+  //
+  // Someone who has collapsed both toolbars by hand looks identical to
+  // fullscreen by this test, so `wasFs` is wrong for them and the toggle then
+  // reports the opposite of what it did. An external audit flagged it.
+  //
+  // There is no fullscreenElement to consult: TradingView sets none and does
+  // not resize the Electron window, which is why the toolbars were used in the
+  // first place. So report the inference AS an inference rather than as a fact.
   const wasFs = before?.left === false && before?.right === false;
   const isFs = after.left === false && after.right === false;
   return {
+    // Inferred from toolbar visibility, not observed directly. Manually
+    // collapsed toolbars are indistinguishable from fullscreen by this signal.
+    was_fullscreen_inferred_from: 'toolbar visibility',
     success: true,
     action: 'fullscreen_toggled',
     was_fullscreen: wasFs,

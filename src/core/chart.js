@@ -55,6 +55,37 @@ function _resolve(deps) {
  * Builds an expression that resolves only when the call really finished.
  * `timeoutMs` bounds it so a hung call reports rather than hanging the tool.
  */
+/**
+ * In-page JS counting studies with this description that have NO usable id.
+ *
+ * Used to bracket an add: anything already in that state before the call is
+ * somebody else's landmine, and the add-failure cleanup must leave it alone.
+ * Scanning backwards for "the first same-named study with no id" removed the
+ * PRE-EXISTING one and left the one this call actually created, then reported
+ * the new one as removed. Found by an external audit.
+ */
+function _countUnregisteredNamed(indicator) {
+  return `
+    (function() {
+      try {
+        var mm = ${CHART_API}._chartWidget.model().model();
+        var srcs = mm.dataSources();
+        var n = 0;
+        for (var i = 0; i < srcs.length; i++) {
+          try {
+            var mi = srcs[i].metaInfo && srcs[i].metaInfo();
+            if (!mi || String(mi.description) !== ${safeString(indicator)}) continue;
+            var idv = (typeof srcs[i].id === 'function') ? srcs[i].id() : null;
+            if (typeof idv === 'string' && idv.length > 0) continue;
+            n++;
+          } catch (e) {}
+        }
+        return n;
+      } catch (e) { return 0; }
+    })()
+  `;
+}
+
 function awaited(call, timeoutMs = 15000) {
   return `
     (function() {
@@ -287,6 +318,11 @@ export async function manageIndicator({ action, indicator, entity_id, inputs: in
   if (action === 'add') {
     const inputArr = inputs ? Object.entries(inputs).map(([k, v]) => ({ id: k, value: v })) : [];
     const before = await evaluate(`${CHART_API}.getAllStudies().map(function(s) { return s.id; })`);
+    // How many same-named studies were ALREADY on the chart without an id.
+    // The cleanup below must not touch those: this call did not create them,
+    // and removing someone else's landmine while leaving our own is worse
+    // than doing nothing. Named _unregisteredBefore to be unmistakable.
+    const _unregisteredBefore = await evaluate(_countUnregisteredNamed(indicator));
     // AWAIT createStudy. It returns Promise<EntityId>. Firing it and sleeping
     // 1500ms was a race, and losing that race leaves a study with no server id
     // that destroys the pane's chart session on its next reconnect. See the
@@ -349,18 +385,24 @@ export async function manageIndicator({ action, indicator, entity_id, inputs: in
           try {
             var mm = ${CHART_API}._chartWidget.model().model();
             var srcs = mm.dataSources();
-            for (var i = srcs.length - 1; i >= 0; i--) {
+            var candidates = [];
+            for (var i = 0; i < srcs.length; i++) {
               try {
                 var mi = srcs[i].metaInfo && srcs[i].metaInfo();
                 if (!mi || String(mi.description) !== ${safeString(indicator)}) continue;
                 var idv = null;
                 try { idv = (typeof srcs[i].id === 'function') ? srcs[i].id() : null; } catch (e) {}
                 if (typeof idv === 'string' && idv.length > 0) continue;
-                mm.removeSource(srcs[i]);
-                return { removed: true };
+                candidates.push(srcs[i]);
               } catch (e) {}
             }
-            return { removed: false };
+            if (candidates.length <= ${Number(_unregisteredBefore) || 0}) {
+              return { removed: false, reason: 'every unregistered study with this name was already on the chart before this call' };
+            }
+            var victim = candidates[candidates.length - 1];
+            var n0 = srcs.length;
+            try { mm.removeSource(victim); } catch (e) { return { removed: false, reason: 'removeSource threw: ' + e.message }; }
+            return { removed: mm.dataSources().length < n0 };
           } catch (e) { return { removed: false, error: e.message }; }
         })()
       `);

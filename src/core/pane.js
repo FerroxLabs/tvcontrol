@@ -10,6 +10,13 @@ import { strictResolve } from './_resolve.js';
 const CWC = 'window.TradingViewApi._chartWidgetCollection';
 const FOCUS_POLL_ATTEMPTS = 12;
 const FOCUS_POLL_MS = 150;
+/** How many charts each layout code means, so the result can be checked. */
+const EXPECTED_PANES = {
+  s: 1, '2h': 2, '2v': 2, '2-1': 3, '1-2': 3, '3h': 3, '3v': 3, '3s': 3,
+  4: 4, '4h': 4, '4v': 4, '4s': 4, 6: 6, 8: 8, 10: 10, 12: 12, 14: 14, 16: 16,
+};
+const LAYOUT_POLL_ATTEMPTS = 8;
+const LAYOUT_POLL_MS = 250;
 const SYMBOL_POLL_ATTEMPTS = 20;
 const SYMBOL_POLL_MS = 250;
 const _PANE_DEPS = new Set(['evaluate', 'evaluateAsync', 'wait']);
@@ -213,9 +220,22 @@ export async function list({ _deps } = {}) {
   // it with. An empty panes array is the absence of evidence, not evidence of
   // zero charts — falling back to 0 there would replace one wrong number with a
   // worse one.
+  // Both sibling readers guard this and list() did not: an evaluate that
+  // returns undefined threw a raw TypeError out of a function whose whole job
+  // is describing state.
+  if (!result || typeof result !== 'object') {
+    throw new ClassifiedError(
+      CATEGORIES.API_UNEXPECTED,
+      'Could not read the pane layout: the page returned nothing.',
+    );
+  }
   const observed = result.real_pane_count ?? ((result.panes || []).length || null);
   const realCount = observed ?? result.chart_count;
-  const codeDisagrees = observed !== null && result.chart_count !== observed;
+  // An ABSENT chart_count is not a disagreeing one. Treating it as one emitted
+  // a permanent layout_warning reading "with undefined chart(s)".
+  const codeDisagrees = observed !== null
+    && result.chart_count !== null && result.chart_count !== undefined
+    && result.chart_count !== observed;
 
   return {
     success: true,
@@ -265,16 +285,46 @@ export async function setLayout({ layout, _deps } = {}) {
     );
   }
 
+  // SETLAYOUT USED TO ECHO ITS OWN ARGUMENT BACK.
+  //
+  // It fired setLayout, slept 500ms, and returned `layout: resolved` from the
+  // parameter regardless of what the chart did. The same pattern this file
+  // condemns and fixes for focus() twenty lines below, left in place here.
+  // An external audit pointed out the inconsistency and it is fair.
+  //
+  // It already reads the real state back for chart_count and panes; that read
+  // just was not used to decide anything. Now it is.
   await deps.evaluateAsync(`${CWC}.setLayout(${safeString(resolved)})`);
-  await deps.wait(500);
 
-  const state = await list({ _deps });
+  const expected = EXPECTED_PANES[resolved] ?? null;
+  let state = null;
+  for (let attempt = 1; attempt <= LAYOUT_POLL_ATTEMPTS; attempt += 1) {
+    await deps.wait(LAYOUT_POLL_MS);
+    state = await list({ _deps });
+    if (expected === null || state.chart_count === expected) break;
+  }
+
+  if (expected !== null && state && state.chart_count !== expected) {
+    throw new ClassifiedError(
+      CATEGORIES.TV_UI_CHANGED,
+      `setLayout("${resolved}") was accepted but the chart has ${state.chart_count} pane(s), not the `
+      + `${expected} that layout means. The layout did not change.`,
+      { hint: 'Run pane_list to see the current layout. A layout that is already applied cannot be distinguished from one that failed to apply.' },
+    );
+  }
+
   return {
     success: true,
     layout: resolved,
     layout_name: LAYOUT_NAMES[resolved],
-    chart_count: state.chart_count,
-    panes: state.panes,
+    chart_count: state ? state.chart_count : null,
+    panes: state ? state.panes : [],
+    // Confirmed from a fresh pane_list read, not echoed from the argument.
+    verified: expected !== null && !!state && state.chart_count === expected,
+    ...(expected === null ? {
+      verify_note: `How many panes "${resolved}" should produce is not recorded, so the count could not `
+        + 'be checked. chart_count above is a real read of the current state.',
+    } : {}),
   };
 }
 

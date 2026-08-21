@@ -1,6 +1,6 @@
-import test from 'node:test';
+import test, { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { waitForChartReady } from '../src/wait.js';
+import { waitForChartReady, symbolMatches } from '../src/wait.js';
 
 test('waitForChartReady accepts TradingView canonical exchange prefixes', async () => {
   const states = [
@@ -58,4 +58,29 @@ test('waitForChartReady keeps exchange-qualified symbols distinct', async () => 
   } finally {
     Date.now = originalNow;
   }
+});
+
+describe('symbolMatches asymmetry', () => {
+  it('accepts a bare request that the chart qualified', () => {
+    // Ask for BTCUSDT, chart reports BINANCE:BTCUSDT. Normal, and a match.
+    assert.equal(symbolMatches('BINANCE:BTCUSDT', 'BTCUSDT'), true);
+    assert.equal(symbolMatches('NASDAQ:AAPL', 'aapl'), true);
+  });
+
+  it('REFUSES a bare label when the caller named an exchange', () => {
+    // Flagged by an external audit. If the caller said NASDAQ:AAPL they meant
+    // NASDAQ, and an unqualified AAPL on the chart could be anything.
+    // waitForChartReady would have confirmed the load either way.
+    assert.equal(symbolMatches('AAPL', 'NASDAQ:AAPL'), false);
+  });
+
+  it('still refuses two different exchanges', () => {
+    assert.equal(symbolMatches('NYSE:AAPL', 'NASDAQ:AAPL'), false);
+  });
+
+  it('matches identical symbols and treats an empty expectation as satisfied', () => {
+    assert.equal(symbolMatches('NASDAQ:AAPL', 'NASDAQ:AAPL'), true);
+    assert.equal(symbolMatches('anything', null), true);
+    assert.equal(symbolMatches(null, 'NASDAQ:AAPL'), false);
+  });
 });

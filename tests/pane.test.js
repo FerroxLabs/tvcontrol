@@ -316,3 +316,65 @@ describe('pane management', () => {
     );
   });
 });
+
+describe('setLayout proves the layout changed', () => {
+  const layoutDeps = (chartCount) => ({
+    evaluate: async (expr) => {
+      if (expr.includes('panes.push')) {
+        return {
+          layout: '4', chart_count: chartCount, real_pane_count: chartCount,
+          active_index: 0,
+          panes: Array.from({ length: chartCount }, (_, i) => ({ index: i, symbol: 'X', resolution: 'D', active: i === 0 })),
+        };
+      }
+      return undefined;
+    },
+    evaluateAsync: async () => {},
+    wait: async () => {},
+  });
+
+  it('confirms the pane count from a fresh read rather than echoing the argument', async () => {
+    const r = await setLayout({ layout: '2x2', _deps: layoutDeps(4) });
+    assert.equal(r.layout, '4');
+    assert.equal(r.chart_count, 4);
+    assert.equal(r.verified, true);
+  });
+
+  it('THROWS when the chart still has the old number of panes', async () => {
+    // It used to fire setLayout, sleep 500ms and return `layout: resolved`
+    // from its own parameter regardless of what happened. The same pattern
+    // this file condemns and fixes for focus() a few functions below, left in
+    // place here until an external audit pointed out the inconsistency.
+    await assert.rejects(
+      setLayout({ layout: '2x2', _deps: layoutDeps(1) }),
+      (err) => err instanceof ClassifiedError
+        && /the chart has 1 pane\(s\), not the 4 that layout means/.test(err.message),
+    );
+  });
+});
+
+describe('pane list refuses to guess', () => {
+  it('throws a classified error rather than a raw TypeError when the page returns nothing', async () => {
+    await assert.rejects(
+      list({ _deps: { evaluate: async () => undefined, evaluateAsync: async () => undefined, wait: async () => {} } }),
+      (err) => err instanceof ClassifiedError
+        && err.category === CATEGORIES.API_UNEXPECTED
+        && /returned nothing/.test(err.message),
+    );
+  });
+
+  it('does not emit a layout warning reading "undefined chart(s)"', async () => {
+    // chart_count absent was treated as a DISAGREEING count, so the warning
+    // fired permanently and read "with undefined chart(s)".
+    const r = await list({
+      _deps: {
+        evaluate: async () => ({ layout: '2h', real_pane_count: 2, active_index: 0,
+          panes: [{ index: 0, symbol: 'A', active: true }, { index: 1, symbol: 'B', active: false }] }),
+        evaluateAsync: async () => {},
+        wait: async () => {},
+      },
+    });
+    assert.ok(!JSON.stringify(r).includes('undefined chart'),
+      'an absent count must not be reported as a disagreeing one');
+  });
+});

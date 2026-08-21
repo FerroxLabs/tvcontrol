@@ -28,6 +28,17 @@ function _symbolMatches(current, expected) {
   const currentQualified = currentFull.includes(':');
   const expectedQualified = expectedFull.includes(':');
   if (currentQualified && expectedQualified) return false;
+  // ASYMMETRY, DELIBERATE AND NARROW.
+  //
+  // Asking for a bare ticker and getting it back qualified is the normal case:
+  // request BTCUSDT, chart reports BINANCE:BTCUSDT. That is a match.
+  //
+  // The reverse is NOT. If the caller named an exchange, they meant that
+  // exchange, and accepting a bare label as proof lets waitForChartReady
+  // confirm NASDAQ:AAPL against a chart showing an unqualified AAPL that could
+  // be anything. An external audit flagged this; pane_set_symbol is shielded by
+  // its resolved_name check, waitForChartReady was not.
+  if (expectedQualified && !currentQualified) return false;
   const currentBare = currentFull.split(':').pop();
   const expectedBare = expectedFull.split(':').pop();
   return currentBare === expectedBare;
