@@ -89,4 +89,28 @@ describe('the server describes itself accurately', () => {
     assert.ok(!tools.some((t) => t.name === 'ui_evaluate'),
       'ui_evaluate must not be registered without TV_MCP_ADVANCED=1');
   });
+
+  it('the README states the number of tools the server actually registers', () => {
+    // Caught during the 2.3.0 pre-flight by booting the packed tarball: the
+    // README said 106, which is the CATALOG total including the gated
+    // ui_evaluate, while the server registers 105. A count in the README is a
+    // claim about the product, and this release is entirely about claims that
+    // do not match what the thing does.
+    const { tools } = boot();
+    const readme = readFileSync(join(__dirname, '..', 'README.md'), 'utf8');
+    // The bold in the README runs to the end of the sentence, so anchoring on a
+    // closing ** right after "MCP tools" matched nothing. The first version of
+    // this test did exactly that and passed while the README was wrong, which
+    // is the failure mode it exists to prevent. Match the number and the phrase
+    // wherever they appear.
+    const claims = [
+      ...readme.matchAll(/(\d+)\s+MCP tools/g),
+      ...readme.matchAll(/(\d+)\s+chart-control and diagnostic tools/g),
+    ].map((m) => Number(m[1]));
+    assert.ok(claims.length >= 1, 'the README no longer states a tool count');
+    for (const claimed of claims) {
+      assert.equal(claimed, tools.length,
+        `README claims ${claimed} tools, the server registers ${tools.length}`);
+    }
+  });
 });

@@ -185,7 +185,7 @@ Minor, not a patch: two new tools and several changed return shapes.
 
 - `README` corrected: it claimed 102 tools and 512 tests, and headlined
   "What is new in 2.2.0" two releases later. It now carries the real counts
-  (106 tools, 732 tests) and documents the watchlist-wide alert sweep.
+  (105 tools registered by default, 732 tests) and documents the watchlist-wide alert sweep.
 
 ## [2.2.6] - 2026-08-20
 
