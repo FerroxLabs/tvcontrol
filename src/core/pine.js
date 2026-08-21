@@ -542,7 +542,7 @@ async function _assertBufferSafeToReplace(confirm_overwrite, what) {
       if (!m) return { ok: false };
       var v = '';
       try { v = m.editor.getValue() || ''; } catch (e) { return { ok: false }; }
-      var lines = v.split('\n');
+      var lines = v.split(String.fromCharCode(10));
       var meaningful = lines.filter(function(l) {
         var t = l.trim();
         return t && t.indexOf('//') !== 0;

@@ -96,9 +96,16 @@ export async function snapshot({ name, overwrite = false, _deps, _snapshots_dir 
   // Errors must surface — silent default-to-empty meant a broken pane API
   // produced a "successful" snapshot missing the entire multi-pane layout.
   let paneList = [];
+  let paneLayout = null;
   try {
     const paneResult = _paneListFn ? await _paneListFn() : await pane.list();
     paneList = paneResult.panes || [];
+    // Keep the REAL layout, and whether it can be trusted. See the payload below.
+    paneLayout = {
+      code: paneResult.layout ?? null,
+      reliable: paneResult.layout_code_reliable !== false,
+      reported_chart_count: paneResult.chart_count ?? null,
+    };
   } catch (err) {
     skipped_at_snapshot.push({ field: 'panes', reason: err.message });
   }
@@ -310,9 +317,26 @@ export async function snapshot({ name, overwrite = false, _deps, _snapshots_dir 
     schema_version: 1,
     captured_at: new Date().toISOString(),
     name,
+    // THIS WAS HARDCODED TO 's'.
+    // Every snapshot ever taken recorded a single-chart layout code regardless
+    // of the real layout, while pane_count correctly said 2, 3 or 4. Restoring
+    // one then applied setLayout("s") and COLLAPSED the operator's multi-pane
+    // layout, reporting "layout" in applied[] as a success. Measured on a live
+    // 2-pane chart on 2026-08-21.
+    //
+    // Record what is actually there, and record whether the code can be
+    // trusted: TradingView's _layoutType goes stale, so a code that contradicts
+    // the pane count must not be replayed. restore() refuses those.
     layout: {
-      code: 's',
+      code: paneLayout && paneLayout.reliable ? paneLayout.code : null,
       pane_count: panesSnap.length,
+      ...(paneLayout && !paneLayout.reliable
+        ? {
+          code_unreliable: true,
+          observed_code: paneLayout.code,
+          note: `TradingView reported layout "${paneLayout.code}" with ${paneLayout.reported_chart_count} chart(s) while ${panesSnap.length} pane(s) existed. The code is stale and was not recorded as authoritative.`,
+        }
+        : {}),
     },
     panes: panesSnap,
     visible_range: visibleRange || undefined,
@@ -424,12 +448,39 @@ export async function restore({ name, _deps, _snapshots_dir } = {}) {
 
   // 1. Layout
   if (snap.layout && snap.layout.pane_count > 1) {
-    try {
-      await pane.setLayout({ layout: snap.layout.code });
-      applied.push('layout');
-      await new Promise(r => setTimeout(r, 300));
-    } catch (err) {
-      skipped.push({ field: 'layout', reason: err.message });
+    // A SNAPSHOT CAN RECORD A LAYOUT CODE THAT CONTRADICTS ITS OWN PANE COUNT.
+    // MEASURED 2026-08-21: snapshotting a live 2-pane layout produced
+    // { code: "s", pane_count: 2 }, because TradingView's _layoutType goes stale
+    // while getAll() keeps returning both widgets. Restoring that applied
+    // setLayout("s"), COLLAPSED a 2-pane layout to one, and reported "layout" in
+    // applied[] as though it had succeeded.
+    //
+    // A single-chart code alongside a multi-pane count is self-contradictory.
+    // Refuse it and say so rather than destroying the layout on the strength of
+    // a value the snapshot itself disagrees with.
+    const SINGLE_CODES = new Set(['s', '1', '1x1', 'single']);
+    if (SINGLE_CODES.has(String(snap.layout.code || '').toLowerCase())) {
+      skipped.push({
+        field: 'layout',
+        reason: `the snapshot records layout code "${snap.layout.code}" (one chart) alongside pane_count ${snap.layout.pane_count}. Those contradict each other, so the layout was left alone rather than collapsed. Re-take the snapshot to capture a correct code.`,
+      });
+    } else {
+      try {
+        await pane.setLayout({ layout: snap.layout.code });
+        // setLayout reports on itself; confirm from a fresh read.
+        const after = await pane.list({ _deps });
+        if (after.chart_count === snap.layout.pane_count) {
+          applied.push('layout');
+        } else {
+          skipped.push({
+            field: 'layout',
+            reason: `setLayout("${snap.layout.code}") was accepted but the chart now has ${after.chart_count} pane(s), not the ${snap.layout.pane_count} the snapshot recorded`,
+          });
+        }
+        await new Promise(r => setTimeout(r, 300));
+      } catch (err) {
+        skipped.push({ field: 'layout', reason: err.message });
+      }
     }
   }
 

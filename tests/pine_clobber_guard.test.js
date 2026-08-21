@@ -82,3 +82,54 @@ describe('pine buffer-clobber guard', () => {
       'pine_new still advertises itself as creating a script');
   });
 });
+
+describe('the guard actually runs', () => {
+  // IT REFUSED FOR THE WRONG REASON. The first version of the in-page probe
+  // contained a bare backslash-n inside a JS TEMPLATE LITERAL. At runtime the
+  // template literal turns that into a REAL newline before the string reaches
+  // evaluate(), producing an unterminated JS string. Every call died with
+  // "SyntaxError: Invalid or unexpected token".
+  //
+  // The operator's script survived, so a live smoke test looked green: the tool
+  // was "safe" only because it was broken, and it was equally broken on an
+  // EMPTY editor where it should have proceeded. A guard that cannot run is not
+  // a guard.
+  //
+  // THE FIRST VERSION OF THIS TEST COULD NOT FAIL. Reading the file as text
+  // yields the two characters backslash and n, which parse fine. The corruption
+  // only exists AFTER template-literal processing. So the escapes have to be
+  // resolved the way the runtime resolves them before anything is parsed.
+  const probeSource = () => {
+    const start = core.indexOf('async function _assertBufferSafeToReplace');
+    assert.ok(start !== -1, 'the guard was renamed or removed');
+    const body = core.slice(start, core.indexOf('\n}', start));
+    const m = body.match(/const buf = await evaluate\(`([\s\S]*?)`\);/);
+    assert.ok(m, 'the buffer probe expression could not be located');
+    return m[1];
+  };
+
+  // Apply the escape processing a template literal performs at runtime.
+  const asRuntimeString = (raw) => raw
+    .replace(/\$\{FIND_MONACO\}/g, 'null')
+    .replace(/\\n/g, '\n')
+    .replace(/\\t/g, '\t')
+    .replace(/\\'/g, "'")
+    .replace(/\\`/g, '`');
+
+  it('the evaluated source still parses AFTER template-literal escaping', () => {
+    const expr = asRuntimeString(probeSource());
+    assert.doesNotThrow(() => new Function(`return ${expr}`),
+      'the string that actually reaches evaluate() does not parse, so every call dies with a SyntaxError instead of guarding');
+  });
+
+  it('no string literal in the probe spans a line break once escaped', () => {
+    // The specific shape of the original bug: '\n' inside a single-quoted
+    // string became a real newline and broke the literal open.
+    const expr = asRuntimeString(probeSource());
+    for (const line of expr.split('\n')) {
+      const singles = (line.match(/'/g) || []).length;
+      assert.equal(singles % 2, 0,
+        `unbalanced quote after escaping, so a string literal spans a line break: ${line.trim().slice(0, 70)}`);
+    }
+  });
+});

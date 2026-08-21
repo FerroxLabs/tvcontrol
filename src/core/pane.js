@@ -87,17 +87,49 @@ export async function list({ _deps } = {}) {
         } catch(e) { panes.push({ index: i, error: e.message, active: false }); }
       }
 
-      return { layout: layoutType, chart_count: count, active_index: activeIndex, panes: panes };
+      // THREE SOURCES THAT CAN DISAGREE, AND TWO OF THEM GO STALE.
+      // layoutType comes from cwc._layoutType, count from cwc.inlineChartsCount,
+      // and panes from cwc.getAll(). MEASURED 2026-08-21: a live 2-pane layout
+      // reported layoutType "s" and inlineChartsCount 1 while getAll() returned
+      // two chart widgets. getAll() is the only one describing what is actually
+      // on screen, so it is the authority; the other two are reported as claims.
+      return {
+        layout: layoutType,
+        chart_count: count,
+        real_pane_count: all.length,
+        active_index: activeIndex,
+        panes: panes
+      };
     })()
   `);
+
+  // Trust the widgets that exist over the layout code that claims to describe
+  // them. Feeding a stale "s" back into setLayout collapses a multi-pane layout,
+  // which is exactly how state_restore destroyed one.
+  // Only override the reported count when there is an OBSERVATION to override
+  // it with. An empty panes array is the absence of evidence, not evidence of
+  // zero charts — falling back to 0 there would replace one wrong number with a
+  // worse one.
+  const observed = result.real_pane_count ?? ((result.panes || []).length || null);
+  const realCount = observed ?? result.chart_count;
+  const codeDisagrees = observed !== null && result.chart_count !== observed;
 
   return {
     success: true,
     layout: result.layout,
     layout_name: LAYOUT_NAMES[result.layout] || result.layout,
-    chart_count: result.chart_count,
+    chart_count: realCount,
     active_index: result.active_index,
     panes: result.panes,
+    // Say plainly when the layout CODE cannot be trusted, so no caller feeds it
+    // back into setLayout and collapses the layout.
+    layout_code_reliable: !codeDisagrees,
+    ...(codeDisagrees
+      ? {
+        reported_chart_count: result.chart_count,
+        layout_warning: `TradingView reports layout "${result.layout}" with ${result.chart_count} chart(s), but ${realCount} chart widget(s) actually exist. The layout code is stale. Do NOT pass it to pane_set_layout or snapshot it as authoritative.`,
+      }
+      : {}),
   };
 }
 
