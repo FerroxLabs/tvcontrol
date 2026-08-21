@@ -249,13 +249,28 @@ export async function setInputs({ entity_id, inputs: inputsRaw, _deps } = {}) {
   const after = result?.after || {};
   const rejected = matched.filter((k) => after[k] !== undefined && String(after[k]) !== String(updated[k]));
 
+  // AN ABSENT READ-BACK IS NOT A PASSING READ-BACK.
+  //
+  // `rejected` only considers keys PRESENT in `after`, so when the read-back
+  // threw or returned nothing, `after` is {} and this reported
+  // success:true, verified:true, applied:{}. The whole point of reading the
+  // value back is to know it took, and no value means we do not know.
+  const unverified = matched.filter((k) => after[k] === undefined);
+
   return {
-    success: unmatched.length === 0 && rejected.length === 0,
+    success: unmatched.length === 0 && rejected.length === 0 && unverified.length === 0,
     entity_id,
     updated_inputs: updated,
     applied: after,
     ...(unmatched.length ? { not_found: unmatched, available_ids: result?.available_ids || [] } : {}),
     ...(rejected.length ? { rejected_by_study: rejected.map((k) => ({ id: k, requested: updated[k], actual: after[k] })) } : {}),
+    ...(unverified.length ? {
+      unverified,
+      verify_note: `${unverified.length} input(s) were set but did not come back in the read-back, so `
+        + 'whether the study took them is unknown. They were NOT retried: setting an input twice is '
+        + 'harmless but reporting an unknown as a success is not. Run data_get_indicator to see the '
+        + 'current values.',
+    } : {}),
     ...(unmatched.length || rejected.length
       ? { error: `${unmatched.length} input(s) did not exist and ${rejected.length} were changed by the study` }
       : {}),

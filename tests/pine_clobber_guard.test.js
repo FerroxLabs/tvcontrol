@@ -16,6 +16,8 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
+import { isExpendableBuffer } from '../src/core/pine.js';
+
 const core = readFileSync(new URL('../src/core/pine.js', import.meta.url), 'utf-8');
 const tools = readFileSync(new URL('../src/tools/pine.js', import.meta.url), 'utf-8');
 
@@ -131,5 +133,70 @@ describe('the guard actually runs', () => {
       assert.equal(singles % 2, 0,
         `unbalanced quote after escaping, so a string literal spans a line break: ${line.trim().slice(0, 70)}`);
     }
+  });
+});
+
+/**
+ * THE DECISION ITSELF, not the shape of the source around it.
+ *
+ * Everything above reads src/core/pine.js as text, because the guard's read
+ * goes over CDP and could not be reached from a unit test. That is how the
+ * threshold below survived: it was documented and never exercised.
+ */
+describe('what counts as an expendable buffer', () => {
+  const buf = (text) => ({
+    chars: text.length,
+    head: text.slice(0, 160),
+    meaningful: text.split('\n').filter((l) => {
+      const t = l.trim();
+      return t !== '' && !t.startsWith('//');
+    }).length,
+  });
+
+  it('an empty buffer is expendable', () => {
+    const v = isExpendableBuffer(buf(''));
+    assert.equal(v.expendable, true);
+    assert.equal(v.reason, 'empty');
+  });
+
+  it('a buffer of nothing but comments and blank lines is expendable', () => {
+    const v = isExpendableBuffer(buf('// scratch\n\n   \n// notes\n'));
+    assert.equal(v.expendable, true);
+  });
+
+  it('our own untouched indicator template is expendable', () => {
+    const v = isExpendableBuffer(buf('//@version=6\nindicator("My script")\nplot(close)'));
+    assert.equal(v.expendable, true);
+    assert.match(v.reason, /untouched indicator template/);
+  });
+
+  it('our own untouched strategy template is expendable', () => {
+    const v = isExpendableBuffer(buf('//@version=6\nstrategy("My strategy", overlay=true)\n'));
+    assert.equal(v.expendable, true);
+    assert.match(v.reason, /untouched strategy template/);
+  });
+
+  it('A REAL THREE-LINE SCRIPT IS NOT EXPENDABLE', () => {
+    // Both external auditors produced this counterexample independently. It is
+    // a working script: three meaningful lines, 41 characters, and the old
+    // `meaningful <= 3 && chars < 200` rule silently overwrote it.
+    const script = '//@version=6\nindicator("X")\nplot(close)';
+    assert.ok(script.length < 200, 'the example really is under the old size threshold');
+    // 2, not 3: the //@version line is a comment. Either way it is under the
+    // old `meaningful <= 3` threshold, which is the point.
+    assert.equal(buf(script).meaningful, 2, 'and under the old line threshold');
+    const v = isExpendableBuffer(buf(script));
+    assert.equal(v.expendable, false, 'someone\'s script is not expendable because it is short');
+  });
+
+  it('a template someone has started editing is not expendable', () => {
+    const v = isExpendableBuffer(buf('//@version=6\nindicator("My script")\nplot(close)\nplot(ta.sma(close, 20))'));
+    assert.equal(v.expendable, false);
+  });
+
+  it('an unreadable buffer is not expendable', () => {
+    assert.equal(isExpendableBuffer(null).expendable, false);
+    assert.equal(isExpendableBuffer({}).expendable, false);
+    assert.equal(isExpendableBuffer(undefined).expendable, false);
   });
 });

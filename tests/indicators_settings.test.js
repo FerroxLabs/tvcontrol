@@ -28,7 +28,13 @@ describe('indicator settings and visibility', () => {
       _deps: {
         evaluate: async (value) => {
           expression = value;
-          return { updated_inputs: { length: 50, source: 'close' } };
+          // `after` is the READ-BACK. This mock used to omit it, which meant
+          // the test asserted the very bug an external audit found: an absent
+          // read-back was swallowed and reported as success with applied:{}.
+          return {
+            updated_inputs: { length: 50, source: 'close' },
+            after: { length: 50, source: 'close' },
+          };
         },
         wait: async () => {},
       },
@@ -113,5 +119,27 @@ describe('indicator settings and visibility', () => {
       }),
       (error) => error instanceof ClassifiedError && error.category === CATEGORIES.STUDY_NOT_FOUND,
     );
+  });
+
+  it('does NOT report success when the read-back comes back empty', () => {
+    // Caught by an external audit. `rejected` only looked at keys PRESENT in
+    // the read-back, so when the read threw or returned nothing this reported
+    // success:true, verified:true, applied:{}. Reading a value back is the
+    // whole point; no value means we do not know, and an unknown is not a
+    // success.
+    return assert.rejects(async () => {
+      const result = await setInputs({
+        entity_id: 'study-1',
+        inputs: { length: 50 },
+        _deps: {
+          evaluate: async () => ({ updated_inputs: { length: 50 } }), // no `after`
+          wait: async () => {},
+        },
+      });
+      assert.equal(result.success, false, 'an unverified set is not a success');
+      assert.deepEqual(result.unverified, ['length']);
+      assert.match(result.verify_note, /NOT retried/);
+      throw new Error('__ok__');
+    }, /__ok__/);
   });
 });

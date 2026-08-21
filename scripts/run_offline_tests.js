@@ -21,6 +21,13 @@ const args = ['--test'];
 // Measured after the fix: 638/638 every run, suite exits on its own in ~14s.
 args.push(...tests);
 
+// process.exit() USED TO RACE THE PIPE FLUSH.
+//
+// stdout.write() followed by process.exit() truncates when stdout is a pipe:
+// `npm test | tail` ended mid-suite with no summary while a redirect to a file
+// was complete. On a FAILING CI run the diagnostics are exactly what gets lost.
+// Setting process.exitCode and returning lets Node drain first.
+//
 // THE SUITE SILENTLY DROPPED 13 TESTS AND STILL EXITED 0.
 //
 // Observed 2026-08-21: three consecutive runs of the SAME tree reported 638,
@@ -34,7 +41,7 @@ args.push(...tests);
 // looking like success.
 //
 // RAISE THIS when you add tests. It is meant to be edited.
-const EXPECTED_MIN_TESTS = 708;
+const EXPECTED_MIN_TESTS = 718;
 
 // HERMETIC. Any core function that reaches the real browser instead of its
 // injected _deps now throws and fails the test that did it. Before this flag,
@@ -46,35 +53,46 @@ const result = spawnSync(process.execPath, args, {
 });
 if (result.stdout) process.stdout.write(result.stdout);
 if (result.stderr) process.stderr.write(result.stderr);
+
+// process.exit() USED TO RACE THE PIPE FLUSH.
+//
+// stdout.write() followed immediately by process.exit() truncates when stdout
+// is a pipe: `npm test | tail` ended mid-suite with no summary, while a
+// redirect to a file was complete. On a FAILING CI run the diagnostics are
+// exactly what gets lost. Reported by an external audit. Setting
+// process.exitCode and letting the script end lets Node drain first.
+//
+// The count gate below reads the in-memory stdout, so it is unaffected either
+// way; this is purely about what a human or a CI log actually sees.
+const fail = (message) => {
+  process.stderr.write(message);
+  process.exitCode = 1;
+};
+
 if (result.error) {
-  process.stderr.write(`${result.error.message}\n`);
-  process.exit(1);
-}
-
-// NODE EMITS THE COUNT TWO DIFFERENT WAYS AND THIS ONLY KNEW ONE OF THEM.
-//
-// Node 22's default reporter prints TAP-style "# tests 692". Node 25 prints
-// "\u2139 tests 692". This regex matched only the first, so on Node 25 a
-// completed, fully passing run was rejected as SUITE INCOMPLETE and the whole
-// gate failed for a formatting difference. Reported by an external audit that
-// ran the suite on Node v25.8.1 and hit exactly that.
-//
-// Accept either. The point of this gate is the denominator, not the glyph.
-const reported = Number(
-  (/^(?:#|ℹ)\s*tests\s+(\d+)\s*$/m.exec(result.stdout || '') || [])[1],
-);
-if (Number.isFinite(reported) && reported < EXPECTED_MIN_TESTS) {
-  process.stderr.write(
-    `\nSUITE INCOMPLETE: ${reported} tests ran, expected at least ${EXPECTED_MIN_TESTS}.\n`
-    + `${EXPECTED_MIN_TESTS - reported} test(s) never reported. This is the known race between\n`
-    + `--test-force-exit and a leaked handle in tests/state.test.js. Re-run; if it persists,\n`
-    + `find the handle rather than lowering the floor.\n`,
+  fail(`${result.error.message}\n`);
+} else {
+  // NODE EMITS THE COUNT TWO DIFFERENT WAYS AND THIS ONLY KNEW ONE OF THEM.
+  //
+  // Node 22's default reporter prints TAP-style "# tests 708". Node 25 prints
+  // "\u2139 tests 708". This regex matched only the first, so on Node 25 a
+  // completed, fully passing run was rejected as SUITE INCOMPLETE and the gate
+  // failed over a glyph. Reported by an external audit that ran the suite on
+  // v25.8.1 and hit exactly that.
+  const reported = Number(
+    (/^(?:#|\u2139)\s*tests\s+(\d+)\s*$/m.exec(result.stdout || '') || [])[1],
   );
-  process.exit(1);
-}
-if (!Number.isFinite(reported)) {
-  process.stderr.write('\nSUITE INCOMPLETE: no test-count line ("# tests N" or "\u2139 tests N") was produced, so nothing can be concluded.\n');
-  process.exit(1);
-}
 
-process.exit(result.status ?? 1);
+  if (!Number.isFinite(reported)) {
+    fail('\nSUITE INCOMPLETE: no test-count line ("# tests N" or "\u2139 tests N") was produced, '
+      + 'so nothing can be concluded.\n');
+  } else if (reported < EXPECTED_MIN_TESTS) {
+    fail(
+      `\nSUITE INCOMPLETE: ${reported} tests ran, expected at least ${EXPECTED_MIN_TESTS}.\n`
+      + `${EXPECTED_MIN_TESTS - reported} test(s) never reported, so this run proves nothing even\n`
+      + 'though it may say "pass". Find out which file stopped early rather than lowering the floor.\n',
+    );
+  } else {
+    process.exitCode = result.status ?? 1;
+  }
+}

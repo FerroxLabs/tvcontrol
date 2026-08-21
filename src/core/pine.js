@@ -534,6 +534,62 @@ export async function getSource() {
  * is about to be lost. Overwriting is still possible, but only when the caller
  * asks for it in as many words.
  */
+/**
+ * The buffers pine_new writes. Module scope because the overwrite guard needs
+ * them: an untouched template of ours is the ONLY non-empty buffer that counts
+ * as expendable, and the guard runs before newScript has picked one.
+ */
+const TEMPLATES = {
+  indicator: '//@version=6\nindicator("My script")\nplot(close)',
+  strategy: '//@version=6\nstrategy("My strategy", overlay=true)\n',
+  library: '//@version=6\n// @description TODO: add library description here\nlibrary("MyLibrary")\n',
+};
+
+/**
+ * Is this editor buffer safe to overwrite without asking?
+ *
+ * ONLY TWO THINGS ARE. An empty buffer, and a buffer that is still one of our
+ * own untouched templates.
+ *
+ * The old rule was `meaningful <= 3 && chars < 200`, and both external auditors
+ * produced the same counterexample independently:
+ *
+ *     //@version=6
+ *     indicator("X")
+ *     plot(close)
+ *
+ * A real, working script. Three meaningful lines. Well under 200 characters.
+ * Silently overwritten. Size is not a measure of what something is worth, and
+ * this project has already destroyed one of the operator's scripts.
+ *
+ * Exported so the decision itself is testable. The surrounding function reads
+ * the buffer over CDP, which made the rule reachable only through a live
+ * browser, so the tests could only assert the SHAPE of the source and never the
+ * behaviour. That is how a guard ends up documented rather than checked.
+ *
+ * @param {{meaningful:number, chars:number, head:string}} buf
+ * @returns {{expendable:boolean, reason:string}}
+ */
+export function isExpendableBuffer(buf) {
+  if (!buf || typeof buf.meaningful !== 'number') {
+    return { expendable: false, reason: 'the buffer could not be read' };
+  }
+  if (buf.meaningful === 0) return { expendable: true, reason: 'empty' };
+
+  const squash = (v) => String(v || '').replace(/\s+/g, ' ').trim();
+  const normalised = squash(buf.head);
+  for (const [kind, tpl] of Object.entries(TEMPLATES)) {
+    const t = squash(tpl);
+    // `head` is truncated at 160 chars, so compare over the shorter of the two
+    // and use the character count to reject anything appended past the head.
+    const n = Math.min(t.length, normalised.length);
+    if (n > 0 && t.slice(0, n) === normalised.slice(0, n) && buf.chars <= tpl.length + 8) {
+      return { expendable: true, reason: `untouched ${kind} template` };
+    }
+  }
+  return { expendable: false, reason: 'the buffer holds something that is not one of our templates' };
+}
+
 async function _assertBufferSafeToReplace(confirm_overwrite, what) {
   if (confirm_overwrite === true) return { skipped: true };
   const buf = await evaluate(`
@@ -558,8 +614,25 @@ async function _assertBufferSafeToReplace(confirm_overwrite, what) {
       { hint: 'Open the Pine Editor and retry, or pass confirm_overwrite:true if you are certain the buffer is expendable.' },
     );
   }
-  // A blank editor, or nothing but the boilerplate template, is fair game.
-  if (buf.meaningful <= 3 && buf.chars < 200) return { skipped: false, buffer: buf };
+  // A BLANK EDITOR IS FAIR GAME. A SHORT SCRIPT IS NOT.
+  //
+  // This used to accept `meaningful <= 3 && chars < 200` as expendable. Both
+  // external auditors pointed out the same counterexample, and they are right:
+  //
+  //     //@version=6
+  //     indicator("X")
+  //     plot(close)
+  //
+  // is a real, working script, three meaningful lines, well under 200
+  // characters, and it was silently overwritten. Size is not a measure of what
+  // something is worth, and this project has already destroyed one of the
+  // operator's scripts.
+  //
+  // Two things are expendable: an empty buffer, and a buffer that is still one
+  // of OUR OWN untouched templates (see TEMPLATES below). Anything else is
+  // somebody's work until they say otherwise.
+  const verdict = isExpendableBuffer(buf);
+  if (verdict.expendable) return { skipped: false, buffer: buf, reason: verdict.reason };
 
   throw new ClassifiedError(
     CATEGORIES.INVALID_ARGUMENT,
@@ -884,11 +957,7 @@ export async function newScript({ type, confirm_overwrite } = {}) {
   await _assertBufferSafeToReplace(confirm_overwrite, 'pine_new');
 
   const typeMap = { indicator: 'indicator', strategy: 'strategy', library: 'library' };
-  const templates = {
-    indicator: '//@version=6\nindicator("My script")\nplot(close)',
-    strategy: '//@version=6\nstrategy("My strategy", overlay=true)\n',
-    library: '//@version=6\n// @description TODO: add library description here\nlibrary("MyLibrary")\n',
-  };
+  const templates = TEMPLATES;
 
   const template = templates[type] || templates.indicator;
 

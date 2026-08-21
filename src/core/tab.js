@@ -377,6 +377,22 @@ export async function switchTab({ index }) {
       ? { index_space_warning: `Chart target ${targetIndex} is now connected, but the visible tab strip shows tab ${strip.active_index} ("${strip.active_label}") as active. These are different index spaces, usually because a non-chart tab occupies a strip slot. Do not call tab_close assuming it will target this tab.` }
       : {}),
     chart_id: target.chart_id,
-    visually_switched: true,
+    // NOT HARDCODED ANY MORE. This said `true` unconditionally, including
+    // when the strip read two lines above reported a DIFFERENT tab active.
+    // Reading its own contradiction and then asserting success over the top is
+    // the exact failure this tool already had once, when it reported a switch
+    // it never performed and left tab_close to close whatever was active.
+    visually_switched: strip
+      ? (strip.active_index === targetIndex)
+      : null,
+    ...(strip && strip.active_index !== targetIndex ? {
+      visual_mismatch: `tab_switch targeted index ${targetIndex} but the tab strip reports index `
+        + `${strip.active_index} (${JSON.stringify(strip.active_label)}) as active. Do NOT run `
+        + 'tab_close after this without passing expect_title.',
+    } : {}),
+    ...(strip ? {} : {
+      visual_note: 'The tab strip could not be read, so which tab is visually active is unknown. '
+        + 'It is reported as null rather than assumed.',
+    }),
   };
 }

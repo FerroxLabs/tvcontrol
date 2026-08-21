@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { start, step, autoplay, stop, trade, status, VALID_AUTOPLAY_DELAYS } from '../src/core/replay.js';
 import { scriptedDeps as mockDeps } from './_helpers.js';
+import { ClassifiedError, CATEGORIES } from '../src/errors.js';
 
 const mockGetReplayApi = () => async () => 'window.__rp';
 
@@ -370,5 +371,43 @@ describe('status()', () => {
     assert.equal(result.current_date, 1700000000);
     assert.equal(result.position, 2);
     assert.equal(result.realized_pnl, 123.45);
+  });
+});
+
+describe('replay_autoplay validates before it mutates', () => {
+  it('does NOT apply the delay when `enabled` is invalid', async () => {
+    // Caught by an external audit. `speed` was validated at the top and
+    // `enabled` further down, AFTER changeAutoplayDelay had already run. So
+    // autoplay({speed: 100, enabled: "yes"}) wrote a setting this file's own
+    // comment says is persisted to the cloud account, and only then threw
+    // INVALID_ARGUMENT. A rejected call that half-applied itself is worse than
+    // either outcome alone.
+    const calls = [];
+    const _deps = {
+      evaluate: async (expr) => { calls.push(expr); return true; },
+      getReplayApi: async () => 'window.__rp',
+    };
+    await assert.rejects(
+      autoplay({ speed: 100, enabled: 'yes', _deps }),
+      (err) => err instanceof ClassifiedError && err.category === CATEGORIES.INVALID_ARGUMENT,
+    );
+    assert.ok(!calls.some((c) => c.includes('changeAutoplayDelay')),
+      'the cloud-persisted delay must not be written by a call that is about to be rejected');
+    assert.deepEqual(calls, [], 'nothing at all should have been evaluated');
+  });
+
+  it('rejects a non-numeric speed instead of silently doing nothing', async () => {
+    // The old `speed > 0` gate meant "abc" skipped validation entirely, did
+    // nothing, and reported success.
+    const _deps = {
+      evaluate: async () => true,
+      getReplayApi: async () => 'window.__rp',
+    };
+    await assert.rejects(
+      autoplay({ speed: 'abc', _deps }),
+      (err) => err instanceof ClassifiedError
+        && err.category === CATEGORIES.INVALID_ARGUMENT
+        && /speed must be a number/.test(err.message),
+    );
   });
 });

@@ -106,9 +106,39 @@ export async function step({ _deps } = {}) {
 }
 
 export async function autoplay({ speed, enabled, _deps } = {}) {
-  // Validate BEFORE any CDP calls — invalid values corrupt cloud account state permanently
-  if (speed > 0 && !VALID_AUTOPLAY_DELAYS.includes(speed))
-    throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, `Invalid autoplay delay ${speed}ms.`, { hint: `Valid values: ${VALID_AUTOPLAY_DELAYS.join(', ')}` });
+  // VALIDATE EVERYTHING BEFORE MUTATING ANYTHING.
+  //
+  // This validated `speed` up here and `enabled` further down, AFTER
+  // changeAutoplayDelay had already been applied. autoplay({speed: 100,
+  // enabled: "yes"}) therefore wrote the delay, which this function's own
+  // comment notes is persisted to the cloud account, and only then threw
+  // INVALID_ARGUMENT. A rejected call that half-applied itself is worse than
+  // either outcome on its own.
+  //
+  // The `speed > 0` gate also meant a non-numeric speed skipped validation
+  // entirely and silently did nothing while reporting success.
+  if (speed !== undefined) {
+    if (typeof speed !== 'number' || !Number.isFinite(speed)) {
+      throw new ClassifiedError(
+        CATEGORIES.INVALID_ARGUMENT,
+        `speed must be a number; received ${JSON.stringify(speed)}`,
+        { hint: `Valid values: ${VALID_AUTOPLAY_DELAYS.join(', ')}. This is a DELAY in ms, so larger is slower.` },
+      );
+    }
+    if (speed > 0 && !VALID_AUTOPLAY_DELAYS.includes(speed)) {
+      throw new ClassifiedError(
+        CATEGORIES.INVALID_ARGUMENT,
+        `Invalid autoplay delay ${speed}ms.`,
+        { hint: `Valid values: ${VALID_AUTOPLAY_DELAYS.join(', ')}` },
+      );
+    }
+  }
+  if (enabled !== undefined && typeof enabled !== 'boolean') {
+    throw new ClassifiedError(
+      CATEGORIES.INVALID_ARGUMENT,
+      'enabled must be a boolean (true or false), or omitted to flip the current state',
+    );
+  }
 
   const { evaluate, getReplayApi } = _resolve(_deps);
   const rp = await getReplayApi();
@@ -123,9 +153,6 @@ export async function autoplay({ speed, enabled, _deps } = {}) {
   // reported autoplay_active:true for a call that meant the opposite. Accept an
   // explicit target and only toggle when it is not already there.
   const wasOn = !!(await evaluate(wv(`${rp}.isAutoplayStarted()`)));
-  if (enabled !== undefined && typeof enabled !== 'boolean') {
-    throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'enabled must be a boolean (true or false), or omitted to flip the current state');
-  }
   const want = enabled === undefined ? !wasOn : enabled;
   if (wasOn !== want) {
     await evaluate(`${rp}.toggleAutoplay()`);
