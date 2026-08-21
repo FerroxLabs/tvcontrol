@@ -44,6 +44,20 @@ Minor, not a patch: two new tools and several changed return shapes.
   page, where the reference still exists. Verified live: a 66-input Pine
   indicator read, hidden, shown and had an input set and reverted, all by name.
   An ambiguous name is refused rather than guessed.
+- **`state_snapshot` captured no `metaInfo` for any study**, while the README
+  promised "the full `metaInfo` blob for published Pine, even ones that
+  normally won't reload". The dataSource index was keyed on `src.id()`, which
+  returns the empty string for Pine, and empty string is falsy, so not one Pine
+  dataSource ever entered the map. The name fallback searched that same map, so
+  it missed too. With no metaInfo the study was not recognised as Pine and its
+  encoded source input was stripped as oversized: measured on a real indicator,
+  66 inputs captured instead of 67, and the missing one was the source blob
+  that makes the study reconstructable.
+
+  Snapshots now index dataSources by description as well. Two studies sharing
+  a name are refused rather than guessed, and the snapshot says why. Verified
+  live end to end: snapshot a private Pine study, remove it from the chart with
+  the count confirmed, and rebuild it from the snapshot alone.
 - **`chart_manage_indicator` remove returned a hardcoded success.** It called
   `removeEntity` and said `success: true` without looking, so a bad id, a
   Pine study, or a throw inside the page all reported the same thing as a real

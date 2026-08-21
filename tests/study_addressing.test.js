@@ -225,3 +225,137 @@ describe('manageIndicator remove proves the study went', () => {
     );
   });
 });
+
+/**
+ * snapshot() CAPTURED NO metaInfo FOR ANY STUDY, WHILE THE README PROMISED IT.
+ *
+ * The dataSource index was built as `if (srcId) dsById[srcId] = src`, and for a
+ * Pine dataSource `src.id()` returns the empty string. Empty string is falsy,
+ * so not one Pine study ever entered that map. The lookup missed, the fallback
+ * loop searched only that same map so it missed too, and full_meta_info came
+ * back null for exactly the studies that need it: private Pine, which restore
+ * cannot rebuild any other way.
+ *
+ * Worse, with no metaInfo the study was not recognised as Pine, so its encoded
+ * source input was stripped as "oversized". Measured on a real indicator:
+ * 66 inputs captured instead of 67, and the missing one was the source blob.
+ */
+describe('snapshot attributes metaInfo to Pine studies', () => {
+  const captureStudiesExpr = async () => {
+    const calls = [];
+    const evaluate = async (expr) => {
+      calls.push(expr);
+      if (/getStudyById\s*\(/.test(expr)) return [];
+      if (expr.includes('getAllStudies')) return { symbol: 'A', resolution: 'D', chartType: 1, studies: [] };
+      return undefined;
+    };
+    const state = await import('../src/core/state.js');
+    const { mkdtempSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const dir = mkdtempSync(join(tmpdir(), 'sa-'));
+    await state.snapshot({
+      name: 'x',
+      _snapshots_dir: dir,
+      _deps: {
+        evaluate, evaluateAsync: evaluate, waitForChartReady: async () => true,
+        getChartApi: async () => 'window.__api',
+        paneList: async () => ({ panes: [{ index: 0, symbol: 'A', resolution: 'D' }] }),
+        drawingList: async () => ({ shapes: [] }),
+      },
+    }).catch(() => {});
+    return calls.find((c) => /getStudyById\s*\(/.test(c));
+  };
+
+  /** Fake chart whose dataSources behave like the real ones for Pine and built-ins. */
+  function pageWith(studies) {
+    const live = studies.map((s) => ({ ...s }));
+    return {
+      getAllStudies: () => live.map((s) => ({ id: s.id, name: s.name })),
+      getStudyById: (id) => {
+        const hit = live.find((s) => s.id === id);
+        if (!hit) throw new Error('There is no such study');
+        return { getInputValues: () => hit.inputs || [] };
+      },
+      _chartWidget: {
+        model: () => ({
+          model: () => ({
+            dataSources: () => live.map((s) => ({
+              // A Pine dataSource reports the EMPTY STRING as its id.
+              id: () => (s.pine ? '' : s.id),
+              metaInfo: () => ({
+                description: s.name,
+                id: s.pine ? `Script$USER;${s.name}@tv-scripting` : `${s.name}@tv-basicstudies`,
+                ...(s.pine ? { scriptIdPart: `USER;${s.name}` } : {}),
+              }),
+            })),
+          }),
+        }),
+      },
+    };
+  }
+
+  const run = (expr, api) => {
+    const window = { TradingViewApi: { _activeChartWidgetWV: { value: () => api } } };
+    // eslint-disable-next-line no-new-func
+    return new Function('window', `return (${expr});`)(window);
+  };
+
+  const BIG = 'x'.repeat(900);
+
+  it('attributes metaInfo to a Pine study whose dataSource id is the empty string', async () => {
+    const expr = await captureStudiesExpr();
+    const api = pageWith([
+      { name: 'TC-RTA V6', id: [], pine: true, inputs: [{ id: 'src', value: BIG }, { id: 'len', value: 9 }] },
+      { name: 'Volume', id: 'T4x6LH', inputs: [{ id: 'length', value: 20 }] },
+    ]);
+    const out = run(expr, api);
+    const pine = out.find((s) => s.name === 'TC-RTA V6');
+    assert.ok(pine.full_meta_info, 'a Pine study must carry its metaInfo or restore cannot rebuild it');
+    assert.equal(pine.scriptIdPart, 'USER;TC-RTA V6');
+    assert.equal(pine.meta_unavailable_reason, null);
+    assert.equal(pine.id, null, 'the empty-array id must not be recorded as an id');
+  });
+
+  it('keeps the oversized source input for Pine, which is the part restore needs', async () => {
+    const expr = await captureStudiesExpr();
+    const api = pageWith([
+      { name: 'TC-RTA V6', id: [], pine: true, inputs: [{ id: 'src', value: BIG }, { id: 'len', value: 9 }] },
+    ]);
+    const pine = run(expr, api)[0];
+    assert.equal(pine.inputs.length, 2, 'the encoded source blob must survive');
+    assert.equal(pine.strippedInputs.length, 0);
+  });
+
+  it('still strips an oversized input from a built-in, which has no reason to carry one', async () => {
+    const expr = await captureStudiesExpr();
+    const api = pageWith([
+      { name: 'Volume', id: 'T4x6LH', inputs: [{ id: 'junk', value: BIG }, { id: 'length', value: 20 }] },
+    ]);
+    const builtin = run(expr, api)[0];
+    assert.equal(builtin.inputs.length, 1);
+    assert.equal(builtin.strippedInputs.length, 1);
+    assert.equal(builtin.strippedInputs[0].value_length, 900);
+  });
+
+  it('refuses to attribute metaInfo when two studies share a name, and says why', async () => {
+    const expr = await captureStudiesExpr();
+    const api = pageWith([
+      { name: 'Twin', id: [], pine: true, inputs: [] },
+      { name: 'Twin', id: [], pine: true, inputs: [] },
+    ]);
+    const out = run(expr, api);
+    for (const s of out) {
+      assert.equal(s.full_meta_info, null, 'guessing here would make restore rebuild the wrong script');
+      assert.match(s.meta_unavailable_reason, /share this name/);
+    }
+  });
+
+  it('resolves a built-in by its real dataSource id, not by name', async () => {
+    const expr = await captureStudiesExpr();
+    const api = pageWith([{ name: 'Volume', id: 'T4x6LH', inputs: [{ id: 'length', value: 20 }] }]);
+    const builtin = run(expr, api)[0];
+    assert.equal(builtin.id, 'T4x6LH');
+    assert.equal(builtin.scriptIdPart, null, 'a built-in has no scriptIdPart');
+  });
+});

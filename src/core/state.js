@@ -191,6 +191,9 @@ export async function snapshot({ name, overwrite = false, _deps, _snapshots_dir 
         // on it gives "[object Object]". The actual id is exposed via id().
         // getStudyById's id format ("8XM9C8") matches what id() returns.
         var dsById = {};
+        var dsByDesc = {};
+        var dsByDupeUnused = null;
+        var dsByDescDupe = {};
         try {
           var sources = chart._chartWidget.model().model().dataSources();
           for (var k = 0; k < sources.length; k++) {
@@ -203,6 +206,20 @@ export async function snapshot({ name, overwrite = false, _deps, _snapshots_dir 
               else if (src._id && typeof src._id.value === 'function') srcId = src._id.value();
             } catch(e) {}
             if (srcId && typeof srcId === 'string') dsById[srcId] = src;
+            // A PINE dataSource HAS NO id: src.id() returns the empty string,
+            // so the line above skipped every one of them and dsById never
+            // held a single Pine study. The lookup below then missed, the
+            // fallback loop only searched dsById so it missed too, and
+            // full_meta_info came back null for exactly the studies that need
+            // it. Index by description as well, which is the study's name and
+            // is the only stable string a Pine dataSource exposes.
+            try {
+              var mi0 = src.metaInfo();
+              if (mi0 && mi0.description) {
+                if (dsByDesc[mi0.description]) dsByDescDupe[mi0.description] = true;
+                else dsByDesc[mi0.description] = src;
+              }
+            } catch(e) {}
           }
         } catch(e) {}
         // Recursively serialize a metaInfo object to a JSON-safe plain copy.
@@ -236,11 +253,15 @@ export async function snapshot({ name, overwrite = false, _deps, _snapshots_dir 
           var raw = [];
           try { raw = study.getInputValues() || []; } catch(e) {}
           // Resolve the underlying dataSource so we can read the real metaInfo.
-          var ds = dsById[s.id];
+          // s.id is a usable string for built-ins and an empty Array for Pine,
+          // so dsById[s.id] can only ever hit for a built-in. Fall back to the
+          // name, and refuse the match when two studies share one: attributing
+          // the wrong metaInfo would make restore rebuild the wrong script.
+          var ds = (typeof s.id === 'string' && s.id) ? dsById[s.id] : null;
+          var dsAmbiguous = false;
           if (!ds) {
-            for (var n in dsById) {
-              try { var m = dsById[n].metaInfo(); if (m && m.description === s.name) { ds = dsById[n]; break; } } catch(_){}
-            }
+            if (dsByDescDupe[s.name]) dsAmbiguous = true;
+            else if (dsByDesc[s.name]) ds = dsByDesc[s.name];
           }
           var metaRaw = null;
           var scriptIdPart = null;
@@ -273,12 +294,20 @@ export async function snapshot({ name, overwrite = false, _deps, _snapshots_dir 
             try { metaInfoFull = _safeCopy(metaRaw, 0, new Set()); } catch(e) {}
           }
           return {
-            id: s.id,
+            // A Pine study's id is an empty Array resolved by reference, so it
+            // is meaningless once serialized. Record null and let the name be
+            // the address, matching what chart_get_state now reports.
+            id: (typeof s.id === 'string' && s.id) ? s.id : null,
             name: s.name,
             scriptIdPart: scriptIdPart,
             inputs: inputs,
             strippedInputs: strippedInputs,
             full_meta_info: metaInfoFull,
+            // Say so when the metaInfo could not be attributed, instead of
+            // letting a null read as "this study has none".
+            meta_unavailable_reason: metaInfoFull ? null
+              : (dsAmbiguous ? 'two studies share this name, so its metaInfo could not be told apart'
+                 : (!ds ? 'no dataSource matched this study' : null)),
           };
         });
       })()
