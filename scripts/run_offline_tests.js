@@ -34,7 +34,7 @@ args.push(...tests);
 // looking like success.
 //
 // RAISE THIS when you add tests. It is meant to be edited.
-const EXPECTED_MIN_TESTS = 692;
+const EXPECTED_MIN_TESTS = 698;
 
 // HERMETIC. Any core function that reaches the real browser instead of its
 // injected _deps now throws and fails the test that did it. Before this flag,
@@ -51,7 +51,18 @@ if (result.error) {
   process.exit(1);
 }
 
-const reported = Number((/^# tests (\d+)$/m.exec(result.stdout || '') || [])[1]);
+// NODE EMITS THE COUNT TWO DIFFERENT WAYS AND THIS ONLY KNEW ONE OF THEM.
+//
+// Node 22's default reporter prints TAP-style "# tests 692". Node 25 prints
+// "\u2139 tests 692". This regex matched only the first, so on Node 25 a
+// completed, fully passing run was rejected as SUITE INCOMPLETE and the whole
+// gate failed for a formatting difference. Reported by an external audit that
+// ran the suite on Node v25.8.1 and hit exactly that.
+//
+// Accept either. The point of this gate is the denominator, not the glyph.
+const reported = Number(
+  (/^(?:#|ℹ)\s*tests\s+(\d+)\s*$/m.exec(result.stdout || '') || [])[1],
+);
 if (Number.isFinite(reported) && reported < EXPECTED_MIN_TESTS) {
   process.stderr.write(
     `\nSUITE INCOMPLETE: ${reported} tests ran, expected at least ${EXPECTED_MIN_TESTS}.\n`
@@ -62,7 +73,7 @@ if (Number.isFinite(reported) && reported < EXPECTED_MIN_TESTS) {
   process.exit(1);
 }
 if (!Number.isFinite(reported)) {
-  process.stderr.write('\nSUITE INCOMPLETE: no "# tests N" line was produced, so nothing can be concluded.\n');
+  process.stderr.write('\nSUITE INCOMPLETE: no test-count line ("# tests N" or "\u2139 tests N") was produced, so nothing can be concluded.\n');
   process.exit(1);
 }
 

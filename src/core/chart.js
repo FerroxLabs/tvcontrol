@@ -287,11 +287,26 @@ export async function manageIndicator({ action, indicator, entity_id, inputs: in
         { hint: 'Use the FULL indicator name (e.g. "Relative Strength Index", not "RSI").' },
       );
     }
-    // The promise resolving is the signal. The settle is now a short courtesy
-    // for the study list to reflect it, not the thing correctness rests on.
+    // USE THE ID THE PROMISE RETURNED, NOT A DIFF OF THE STUDY LIST.
+    //
+    // createStudy resolves to the EntityId of the study IT created. Diffing
+    // getAllStudies() before and after attributes ANY study that registered in
+    // the meantime to this call, so a concurrent add elsewhere could make a
+    // failed add here report success and leave the unregistered study behind.
+    // The returned id is the only value that is about this call.
+    //
+    // The list diff stays as a fallback for the case where the promise
+    // resolved without a usable value, and it is reported as a fallback.
     await sleep(250);
     const after = await evaluate(`${CHART_API}.getAllStudies().map(function(s) { return s.id; })`);
-    const newIds = (after || []).filter(id => !(before || []).includes(id));
+    const returnedId = (created && typeof created.value === 'string' && created.value.length > 0)
+      ? created.value : null;
+    const listDiff = (after || []).filter(id => !(before || []).includes(id));
+    // A returned id must also be a study that is really on the chart. If
+    // createStudy handed back an id the chart does not have, that is not a
+    // success either.
+    const returnedIsPresent = returnedId !== null && (after || []).includes(returnedId);
+    const newIds = returnedIsPresent ? [returnedId] : listDiff;
     if (newIds.length === 0) {
       // Old behavior returned { success:false } with no category/hint, which an
       // agent can't act on — and a slow add that actually succeeded after the
@@ -347,7 +362,22 @@ export async function manageIndicator({ action, indicator, entity_id, inputs: in
         },
       );
     }
-    return { success: true, action: 'add', indicator, entity_id: usable[0], new_study_count: usable.length };
+    return {
+      success: true,
+      action: 'add',
+      indicator,
+      entity_id: usable[0],
+      new_study_count: usable.length,
+      // Say which evidence this rests on. An id straight from createStudy is
+      // about this call; a list diff is an inference that a concurrent add
+      // could have poisoned.
+      id_source: returnedIsPresent ? 'createStudy_return' : 'study_list_diff',
+      ...(returnedIsPresent ? {} : {
+        id_note: 'createStudy did not return a usable id, so this id comes from comparing the study '
+          + 'list before and after. If another study registered during the call, this could name the '
+          + 'wrong one. Confirm with chart_get_state if it matters.',
+      }),
+    };
   } else if (action === 'remove') {
     if (!entity_id) throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'entity_id required for remove action. Use chart_get_state to find study IDs.');
     // REMOVE USED TO RETURN A HARDCODED SUCCESS. It called removeEntity() and

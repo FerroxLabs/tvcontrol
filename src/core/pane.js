@@ -116,9 +116,22 @@ async function _paneSymbols(deps) {
         try {
           var m = all[i].model ? all[i].model() : null;
           var ms = m ? m.mainSeries() : null;
-          var resolved = false;
-          try { resolved = ms ? (ms.symbolInfo() !== null) : false; } catch (e) { resolved = false; }
-          out.push({ index: i, symbol: ms ? ms.symbol() : null, resolved: resolved });
+          // symbolInfo() being non-null is NOT proof it describes the symbol
+          // just requested. During a change the label flips first and
+          // symbolInfo can still hold the PREVIOUS instrument, so a bare null
+          // check reports the old symbol's resolution as the new one's.
+          // Return what it actually resolved to and let the caller compare.
+          var resolvedName = null;
+          try {
+            var si = ms ? ms.symbolInfo() : null;
+            if (si) resolvedName = String(si.pro_name || si.full_name || si.name || '');
+          } catch (e) { resolvedName = null; }
+          out.push({
+            index: i,
+            symbol: ms ? ms.symbol() : null,
+            resolved: resolvedName !== null,
+            resolved_name: resolvedName
+          });
         } catch (e) { out.push({ index: i, symbol: null, resolved: false, error: e.message }); }
       }
       return out;
@@ -128,7 +141,9 @@ async function _paneSymbols(deps) {
     throw new ClassifiedError(CATEGORIES.API_UNEXPECTED, 'Could not read pane symbols: the page returned nothing.');
   }
   const map = {};
-  for (const r of rows) map[r.index] = { symbol: r.symbol, resolved: !!r.resolved };
+  for (const r of rows) {
+    map[r.index] = { symbol: r.symbol, resolved: !!r.resolved, resolved_name: r.resolved_name ?? null };
+  }
   return map;
 }
 
@@ -384,9 +399,15 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
   for (let attempt = 1; attempt <= SYMBOL_POLL_ATTEMPTS; attempt += 1) {
     await deps.wait(SYMBOL_POLL_MS);
     after = await _paneSymbols(deps);
-    // BOTH conditions. The label matching says the request was accepted; the
-    // resolution says the chart actually has the instrument.
-    if (symbolMatches(after[idx].symbol, cleanSymbol) && after[idx].resolved) { matched = true; break; }
+    // THREE conditions, because two were not enough. The label matching says
+    // the request was accepted. Something being resolved says the chart has AN
+    // instrument. Only the resolved instrument matching the request says it has
+    // THE one that was asked for: during a change the label flips first while
+    // symbolInfo still holds the previous instrument, and checking only that it
+    // is non-null reports the old symbol's resolution as the new one's.
+    if (symbolMatches(after[idx].symbol, cleanSymbol)
+        && after[idx].resolved
+        && symbolMatches(after[idx].resolved_name, cleanSymbol)) { matched = true; break; }
   }
 
   // Say what moved that should not have, whether or not the target took. A
@@ -407,13 +428,19 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
 
   if (!matched) {
     const labelOk = symbolMatches(after[idx]?.symbol, cleanSymbol);
+    const secs = (SYMBOL_POLL_ATTEMPTS * SYMBOL_POLL_MS) / 1000;
+    const stale = labelOk && after[idx]?.resolved
+      && !symbolMatches(after[idx].resolved_name, cleanSymbol);
     throw new ClassifiedError(
       CATEGORIES.CHART_LOADING,
-      labelOk
-        ? `Pane ${idx} now reads "${after[idx].symbol}" but the symbol never RESOLVED after ` +
-          `${(SYMBOL_POLL_ATTEMPTS * SYMBOL_POLL_MS) / 1000}s: the chart has the label without the instrument.`
-        : `Set pane ${idx} to "${cleanSymbol}" but after ` +
-          `${(SYMBOL_POLL_ATTEMPTS * SYMBOL_POLL_MS) / 1000}s it still reads "${after[idx]?.symbol ?? 'unreadable'}".`,
+      stale
+        ? `Pane ${idx} reads "${after[idx].symbol}" but after ${secs}s the instrument it has resolved is ` +
+          `still "${after[idx].resolved_name}". The label changed and the data did not.`
+        : labelOk
+          ? `Pane ${idx} now reads "${after[idx].symbol}" but the symbol never RESOLVED after ${secs}s: ` +
+            'the chart has the label without the instrument.'
+          : `Set pane ${idx} to "${cleanSymbol}" but after ${secs}s it still reads ` +
+            `"${after[idx]?.symbol ?? 'unreadable'}".`,
       {
         hint: labelOk
           ? 'A pane with a label but no resolved symbol is the stuck-on-reconnect state. Run tv_chart_health.'
@@ -434,6 +461,9 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
     // verified means the instrument resolved, not merely that the label changed.
     verified: true,
     symbol_resolved: true,
+    // The instrument the server actually resolved, which is what proves the
+    // data behind the label is the data that was asked for.
+    resolved_name: after[idx].resolved_name,
     other_panes_unchanged: true,
   };
 }

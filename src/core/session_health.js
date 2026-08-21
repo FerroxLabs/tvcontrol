@@ -252,6 +252,8 @@ export async function repair({ pane = null, dry_run = false, _deps } = {}) {
   }
 
   const removed = [];
+  const reconnected = [];
+  const skippedReconnects = [];
   for (const target of targets) {
     for (const name of target.poisoned_studies) {
       // Remove by REFERENCE from inside the page. A poisoned study has no id,
@@ -300,7 +302,27 @@ export async function repair({ pane = null, dry_run = false, _deps } = {}) {
       });
     }
 
-    // Bring the session back now that nothing poisons create_study.
+    // ONLY RECONNECT IF THE POISON IS ACTUALLY GONE.
+    //
+    // This used to reconnect unconditionally, under a comment claiming
+    // "nothing poisons create_study" that was false whenever a removal had
+    // failed. Reconnecting with the poisoned study still attached restarts the
+    // exact critical-error loop this tool exists to end, so a failed repair
+    // actively re-broke the pane it was called to fix.
+    //
+    // Setup-verified cleanup: the reconnect runs only when its setup
+    // verifiably succeeded.
+    const removedHere = removed.filter((r) => r.pane === target.index);
+    const allGone = removedHere.length > 0 && removedHere.every((r) => r.removed);
+    if (!allGone) {
+      skippedReconnects.push({
+        pane: target.index,
+        reason: 'a poisoned study is still attached, so reconnecting would restart the critical-error loop',
+        not_removed: removedHere.filter((r) => !r.removed).map((r) => r.study),
+      });
+      continue;
+    }
+    reconnected.push(target.index);
     await evaluate(`
       (function() {
         try {
@@ -324,10 +346,22 @@ export async function repair({ pane = null, dry_run = false, _deps } = {}) {
     .map((t) => after.panes[t.index])
     .filter((p) => p && !p.healthy);
 
+  // SUCCESS IS NOT UNCONDITIONAL.
+  //
+  // This returned `success: true, action: 'repaired'` no matter what happened,
+  // including when every removal failed and nothing was repaired at all. That
+  // is the silent-success class, inside the tool written to end it. The caller
+  // reads `success` first and a false `healthy` further down does not undo a
+  // true `success`.
+  const anythingRemoved = removed.some((r) => r.removed);
+  const fullyHealthy = stillBroken.length === 0;
   return {
-    success: true,
-    action: 'repaired',
+    success: fullyHealthy,
+    action: fullyHealthy ? 'repaired'
+      : (anythingRemoved ? 'partially_repaired' : 'repair_failed'),
     removed,
+    ...(skippedReconnects.length > 0 ? { reconnect_skipped: skippedReconnects } : {}),
+    ...(reconnected.length > 0 ? { reconnected_panes: reconnected } : {}),
     // Say plainly what the operator lost, because they have to put it back.
     removed_studies: removed.filter((r) => r.removed).map((r) => r.study),
     re_add_hint: removed.some((r) => r.removed)
@@ -338,8 +372,12 @@ export async function repair({ pane = null, dry_run = false, _deps } = {}) {
     healthy: stillBroken.length === 0,
     ...(stillBroken.length > 0 ? {
       still_broken: stillBroken.map((p) => ({ pane: p.index, problems: p.problems })),
-      note: 'The poisoned studies are gone but the session has not come back. The connection itself ' +
-            'may be down: check tv_health_check.',
+      note: anythingRemoved && skippedReconnects.length === 0
+        ? 'The poisoned studies are gone but the session has not come back. The connection itself ' +
+          'may be down: check tv_health_check.'
+        : 'Nothing could be removed, so the pane was deliberately NOT reconnected: doing so with the ' +
+          'poisoned study still attached would restart the loop. The pane is no worse than before ' +
+          'this call. Reload the layout to clear it.',
     } : {}),
     panes: after.panes.map((p) => ({
       index: p.index, symbol: p.symbol, session_id: p.session_id,

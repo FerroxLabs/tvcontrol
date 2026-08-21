@@ -24,10 +24,13 @@ const paneDeps = ({ evaluate, evaluateAsync } = {}) => ({
  * reproducing the collateral damage.
  */
 function mockPage({ symbols = ['NASDAQ:AAPL', 'NASDAQ:NVDA'], active = 0, focusWorks = true,
-  writesToPane = null, resolves = true } = {}) {
+  writesToPane = null, resolves = true, resolutionLags = false } = {}) {
   // `resolves: false` reproduces the pane that takes the LABEL but never
-  // resolves the instrument, which is the stuck-on-reconnect state.
-  const state = { symbols: [...symbols], active, resolves };
+  // resolves the instrument. `resolutionLags` reproduces the sharper case:
+  // the label changes while symbolInfo still holds the PREVIOUS instrument,
+  // which a bare non-null check reads as success.
+  const state = { symbols: [...symbols], active, resolves, resolutionLags,
+    resolvedNames: [...symbols] };
   const calls = [];
   const evaluate = async (expr) => {
     calls.push(expr);
@@ -42,7 +45,12 @@ function mockPage({ symbols = ['NASDAQ:AAPL', 'NASDAQ:NVDA'], active = 0, focusW
       return { index: state.active, total: state.symbols.length };
     }
     if (expr.includes('mainSeries()') && expr.includes('out.push')) {
-      return state.symbols.map((symbol, index) => ({ index, symbol, resolved: state.resolves }));
+      return state.symbols.map((symbol, index) => ({
+        index,
+        symbol,
+        resolved: state.resolves,
+        resolved_name: state.resolves ? state.resolvedNames[index] : null,
+      }));
     }
     return undefined;
   };
@@ -52,6 +60,8 @@ function mockPage({ symbols = ['NASDAQ:AAPL', 'NASDAQ:NVDA'], active = 0, focusW
     if (m) {
       const target = writesToPane === null ? state.active : writesToPane;
       state.symbols[target] = m[1];
+      // The instrument follows the label unless we are modelling the lag.
+      if (!state.resolutionLags) state.resolvedNames[target] = m[1];
     }
   };
   return { _deps: { evaluate, evaluateAsync, wait: async () => {} }, state, calls };
@@ -167,11 +177,30 @@ describe('pane management', () => {
     const page = mockPage({ symbols: ['NASDAQ:AAPL', 'NASDAQ:NVDA'], active: 0 });
     page._deps.evaluateAsync = async (expr) => {
       const m = /setSymbol\("([^"]+)"/.exec(expr);
-      if (m) page.state.symbols[page.state.active] = `BINANCE:${m[1]}`;
+      if (m) {
+        page.state.symbols[page.state.active] = `BINANCE:${m[1]}`;
+        page.state.resolvedNames[page.state.active] = `BINANCE:${m[1]}`;
+      }
     };
     const result = await setSymbol({ index: 0, symbol: 'BTCUSDT', _deps: page._deps });
     assert.equal(result.requested, 'BTCUSDT');
     assert.equal(result.symbol, 'BINANCE:BTCUSDT', 'report what the chart settled on, not the request');
+  });
+
+  it('refuses when the label changed but symbolInfo still holds the PREVIOUS instrument', async () => {
+    // Caught by an external audit. symbolInfo() !== null does not prove it
+    // describes the symbol just requested: during a change the label flips
+    // first and symbolInfo can still hold the old instrument, so a bare
+    // non-null check reports the previous symbol's resolution as this one's.
+    const page = mockPage({ symbols: ['NASDAQ:AAPL', 'NASDAQ:NVDA'], active: 0, resolutionLags: true });
+    await assert.rejects(
+      setSymbol({ index: 0, symbol: 'NASDAQ:TSLA', _deps: page._deps }),
+      (err) => err instanceof ClassifiedError
+        && /the instrument it has resolved is still "NASDAQ:AAPL"/.test(err.message)
+        && /The label changed and the data did not/.test(err.message),
+    );
+    assert.equal(page.state.symbols[0], 'NASDAQ:TSLA');
+    assert.equal(page.state.resolvedNames[0], 'NASDAQ:AAPL', 'the instrument never followed');
   });
 
   it('refuses to report success when the label changed but the symbol never RESOLVED', async () => {

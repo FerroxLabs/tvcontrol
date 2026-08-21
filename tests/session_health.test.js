@@ -188,6 +188,7 @@ describe('tv_repair_chart', () => {
   it('removes the poisoned study, reconnects, and comes back healthy', async () => {
     const page = mockCharts(POISONED);
     const r = await repair({ _deps: page._deps });
+    assert.equal(r.success, true);
     assert.equal(r.action, 'repaired');
     assert.deepEqual(r.removed_studies, ['TC-RTA V6']);
     assert.equal(r.healthy, true);
@@ -255,12 +256,43 @@ describe('tv_repair_chart', () => {
     assert.match(r.note, /tv_health_check/);
   });
 
-  it('reports a study it could not remove rather than claiming a repair', async () => {
+  it('does NOT report success when nothing could be removed', async () => {
+    // Caught by an external audit. This returned success: true and
+    // action: 'repaired' unconditionally, including when every removal failed
+    // and nothing was repaired at all. A caller reads success first, and a
+    // false `healthy` further down does not undo a true `success`. That is the
+    // silent-success class, inside the tool written to end it.
     const page = mockCharts([{ ...POISONED[0], removeFails: true }]);
     const r = await repair({ _deps: page._deps });
+    assert.equal(r.success, false, 'a repair that repaired nothing is not a success');
+    assert.equal(r.action, 'repair_failed');
     assert.equal(r.removed[0].removed, false);
     assert.match(r.removed[0].reason, /removeSource threw/);
     assert.equal(r.healthy, false);
+  });
+
+  it('does NOT reconnect a pane whose poison is still attached', async () => {
+    // Also from the audit, and worse than the reporting bug. The reconnect ran
+    // unconditionally under a comment claiming "nothing poisons create_study",
+    // which is false when a removal failed. Reconnecting with the poisoned
+    // study still there restarts the exact critical-error loop this tool
+    // exists to end, so a failed repair actively re-broke the pane.
+    const page = mockCharts([{ ...POISONED[0], removeFails: true }]);
+    const r = await repair({ _deps: page._deps });
+    assert.deepEqual(page.calls.connected, [], 'reconnecting here restarts the loop');
+    assert.ok(Array.isArray(r.reconnect_skipped) && r.reconnect_skipped.length === 1);
+    assert.match(r.reconnect_skipped[0].reason, /restart the critical-error loop/);
+    assert.deepEqual(r.reconnect_skipped[0].not_removed, ['TC-RTA V6']);
+    assert.match(r.note, /no worse than before/);
+  });
+
+  it('reports partially_repaired when one of two panes could not be cleaned', async () => {
+    const page = mockCharts([POISONED[0], { ...POISONED[0], removeFails: true }]);
+    const r = await repair({ _deps: page._deps });
+    assert.equal(r.success, false);
+    assert.equal(r.action, 'partially_repaired');
+    assert.deepEqual(page.calls.connected, [0], 'only the pane that was actually cleaned');
+    assert.deepEqual(r.removed_studies, ['TC-RTA V6']);
   });
 
   it('rejects a pane index that does not exist', async () => {

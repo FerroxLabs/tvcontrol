@@ -331,7 +331,7 @@ export async function createBulk({
 
   // ONE verification read for the whole batch. The per-call "ok" is the action
   // reporting on itself; only a fresh list proves an alert exists.
-  const after = await _presentIds({ _deps });
+  const after = await _presentAlerts({ _deps });
   if (after === null) {
     throw new ClassifiedError(
       CATEGORIES.API_UNEXPECTED,
@@ -340,10 +340,35 @@ export async function createBulk({
     );
   }
 
-  const results = attempted.map((a) => ({
-    ...a,
-    created: a.alert_id != null && after.has(String(a.alert_id)),
-  }));
+  // AN ID COMING BACK IS NOT PROOF THE ALERT IS THE ONE THAT WAS ASKED FOR.
+  //
+  // This used to accept `after.has(id)` as confirmation, so an alert stored
+  // against the wrong symbol, or at the wrong resolution, verified as created.
+  // On a whole-watchlist sweep pointed at a webhook that is the difference
+  // between 74 correct alerts and 74 alerts on one instrument. Check the stored
+  // record against the request.
+  const results = attempted.map((a) => {
+    const stored = a.alert_id != null ? after.get(String(a.alert_id)) : undefined;
+    if (!stored) return { ...a, created: false, reason: 'no alert with this id is in the list' };
+    if (!_sameSymbol(stored.symbol, a.symbol)) {
+      return {
+        ...a,
+        created: false,
+        reason: `the stored alert is on ${JSON.stringify(stored.symbol)}, not ${JSON.stringify(a.symbol)}`,
+        stored_symbol: stored.symbol,
+      };
+    }
+    if (resolution && stored.resolution != null
+        && String(stored.resolution).toUpperCase() !== String(resolution).toUpperCase()) {
+      return {
+        ...a,
+        created: false,
+        reason: `the stored alert is at resolution ${JSON.stringify(String(stored.resolution))}, not ${JSON.stringify(String(resolution))}`,
+        stored_resolution: stored.resolution,
+      };
+    }
+    return { ...a, created: true, stored_symbol: stored.symbol };
+  });
   const created = results.filter((r) => r.created);
   const failed = results.filter((r) => !r.created);
 
@@ -363,6 +388,16 @@ export async function createBulk({
       ? { error: `${failed.length} of ${attempted.length} alert(s) could not be confirmed${unpriced.length ? `; ${unpriced.length} symbol(s) had no quote` : ''}` }
       : {}),
     verified_from: 'list_alerts',
+    // SAY WHAT WAS NOT CHECKED. list_alerts does not return the webhook URL,
+    // so a webhook that the API silently dropped cannot be detected here.
+    // Reporting that as verified would be the same lie this function was
+    // rewritten to stop telling.
+    ...(webhook_url ? {
+      webhook_verified: null,
+      webhook_note: 'The alert list endpoint does not return webhook URLs, so the webhook could not be '
+        + 'confirmed from here. Symbol and resolution were checked against the stored record. Open one '
+        + 'alert in TradingView to confirm the webhook if it matters.',
+    } : {}),
     source: 'pricealerts_api',
   };
 }
@@ -523,6 +558,38 @@ async function _presentIds({ _deps } = {}) {
   }
   if (!snap || snap.success !== true || !Array.isArray(snap.alerts)) return null;
   return new Set(snap.alerts.map((a) => String(a.alert_id)));
+}
+
+/**
+ * id -> the stored alert, so a create can be checked against what the server
+ * actually holds rather than against the fact that an id came back.
+ *
+ * Returns null when the list could not be read. A failed read is not an empty
+ * result and must never be treated as one.
+ */
+async function _presentAlerts({ _deps } = {}) {
+  let snap;
+  try {
+    snap = await list({ _deps });
+  } catch {
+    return null;
+  }
+  if (!snap || snap.success !== true || !Array.isArray(snap.alerts)) return null;
+  const map = new Map();
+  for (const a of snap.alerts) map.set(String(a.alert_id), a);
+  return map;
+}
+
+/** Same tolerance as the chart uses: a bare ticker may come back qualified. */
+function _sameSymbol(stored, requested) {
+  if (!requested) return true;
+  if (!stored) return false;
+  const norm = (v) => String(v).trim().toUpperCase();
+  const a = norm(stored);
+  const b = norm(requested);
+  if (a === b) return true;
+  if (a.includes(':') && b.includes(':')) return false;
+  return a.split(':').pop() === b.split(':').pop();
 }
 
 async function _survivingIds(ids, { _deps } = {}) {

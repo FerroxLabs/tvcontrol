@@ -871,8 +871,27 @@ export async function injectPublishedStudy({ metaInfo, inputs = {}, _deps } = {}
           return false;
         };
 
-        // A path succeeded only if it produced a source the server knows about.
-        var registered = function() { return usableCount() > beforeUsable; };
+        // REGISTRATION MUST BE ABOUT THIS STUDY, NOT A COUNT.
+        //
+        // usableCount() > beforeUsable counts ANY source that registered in the
+        // meantime, so a concurrent add elsewhere could make a failed inject
+        // here report success and leave the session-killing study attached.
+        // Look for a source matching THIS metaInfo that now has a usable id.
+        var registered = function() {
+        try {
+        var srcs = cw._chartWidget.model().model().dataSources();
+        for (var i = srcs.length - 1; i >= 0; i--) {
+        try {
+        if (!srcs[i].metaInfo) continue;
+        var mi = srcs[i].metaInfo();
+        if (!mi || String(mi.description) !== String(meta.description)) continue;
+        var idv = (typeof srcs[i].id === 'function') ? srcs[i].id() : null;
+        if (typeof idv === 'string' && idv.length > 0) return true;
+        } catch (e) {}
+        }
+        } catch (e) {}
+        return false;
+        };
 
         // Find the most recently inserted strategy-bearing source and apply
         // the snapshot inputs to it. Without this the study is on chart but
