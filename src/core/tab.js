@@ -310,14 +310,61 @@ export async function closeTab({ expect_title, _deps } = {}) {
     );
   }
 
+  // A COUNT THAT DROPPED DOES NOT SAY WHICH TAB WENT.
+  //
+  // The snapshot and the click happen in SEPARATE CDP sessions, tens to
+  // hundreds of milliseconds apart, and the click re-queries `.tab.active`
+  // fresh. So it closes whatever is active AT CLICK TIME, which need not be
+  // the tab named in the snapshot. This then reported `closed: victim` from
+  // the stale snapshot with verified: true, on the strength of a count. That
+  // is a narrower version of the incident that closed the operator's chart
+  // tab, in the function whose header comment claims to have fixed it. Found
+  // by an external audit.
+  //
+  // Compare the label multisets and say what ACTUALLY left.
+  const tally = (labels) => {
+    const m = new Map();
+    for (const l of labels || []) m.set(l, (m.get(l) || 0) + 1);
+    return m;
+  };
+  const beforeTally = tally(snapshot.labels);
+  const afterTally = tally(after.labels);
+  const departed = [];
+  for (const [label, n] of beforeTally) {
+    const left = n - (afterTally.get(label) || 0);
+    for (let i = 0; i < left; i += 1) departed.push(label);
+  }
+
+  const victimLabel = typeof victim === 'string' ? victim : (victim && victim.label) || null;
+  const victimWent = victimLabel === null
+    ? null
+    : departed.some((l) => l === victimLabel);
+
+  if (victimWent === false) {
+    throw new ClassifiedError(
+      CATEGORIES.TV_UI_CHANGED,
+      `tab_close aimed at ${JSON.stringify(victimLabel)} but that tab is still open. `
+      + `What actually closed: ${departed.length ? departed.map((l) => JSON.stringify(l)).join(', ') : 'could not be determined'}. `
+      + 'The active tab changed between reading the strip and clicking close.',
+      { hint: 'Call tab_list to see the true current state. Pass expect_title to make tab_close refuse rather than guess.' },
+    );
+  }
+
   return {
     success: true,
     action: 'tab_closed',
-    closed: victim,
+    closed: victimLabel,
+    // What left according to the labels, not according to the count.
+    closed_observed: departed.length === 1 ? departed[0] : departed,
     tabs_before: snapshot.count,
     tabs_after: after.count,
     remaining: after.labels,
-    verified: true,
+    verified: victimWent === true,
+    ...(victimWent === null ? {
+      verify_note: 'The victim had no readable label, so which tab closed could only be inferred from '
+        + 'the label diff above. Labels are truncated to 60 characters, so identically-prefixed titles '
+        + 'are indistinguishable.',
+    } : {}),
   };
 }
 

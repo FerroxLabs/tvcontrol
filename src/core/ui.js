@@ -597,18 +597,66 @@ export async function typeText({ text, expect_focus }) {
     }
   }
 
-  await c.Input.insertText({ text });
-
-  const after = await evaluate(`
+  // PIN THE TARGET ACROSS THE WRITE.
+  //
+  // Focus was checked before insertText and then never again: the read-back
+  // took document.activeElement a SECOND time and compared its length to the
+  // first element's. An autocomplete or a dialog that steals focus mid-write
+  // therefore made `verified` a coin flip between two different fields, while
+  // `target` in the response still named the original. Both external auditors
+  // flagged it.
+  //
+  // Tag it, so identity is exact rather than inferred from tag+name.
+  const MARK = 'data-tvcontrol-typing';
+  await evaluate(`
     (function() {
       var el = document.activeElement;
-      if (!el) return { value_len: null };
-      return { value_len: typeof el.value === 'string' ? el.value.length : null, tag: el.tagName };
+      if (el && el.setAttribute) el.setAttribute(${JSON.stringify(MARK)}, '1');
+      return true;
     })()
   `);
-  const grew = typeof before.value_len === 'number' && typeof after?.value_len === 'number'
+
+  let after = null;
+  try {
+    await c.Input.insertText({ text });
+    after = await evaluate(`
+      (function() {
+        var el = document.activeElement;
+        if (!el) return { value_len: null, same_element: false };
+        return {
+          value_len: typeof el.value === 'string' ? el.value.length : null,
+          tag: el.tagName,
+          name: el.getAttribute('name') || el.getAttribute('data-name') || el.getAttribute('aria-label') || null,
+          same_element: el.getAttribute(${JSON.stringify(MARK)}) === '1'
+        };
+      })()
+    `);
+  } finally {
+    // Never leave our marker on the operator's DOM, whatever happened.
+    await evaluate(`
+      (function() {
+        var marked = document.querySelectorAll('[' + ${JSON.stringify(MARK)} + ']');
+        for (var i = 0; i < marked.length; i++) marked[i].removeAttribute(${JSON.stringify(MARK)});
+        return marked.length;
+      })()
+    `).catch(() => {});
+  }
+
+  const sameElement = after ? after.same_element === true : null;
+  const grew = sameElement === true
+    && typeof before.value_len === 'number' && typeof after?.value_len === 'number'
     ? after.value_len - before.value_len
     : null;
+
+  if (sameElement === false) {
+    throw new ClassifiedError(
+      CATEGORIES.TV_UI_CHANGED,
+      `Focus moved while typing. The text was aimed at ${JSON.stringify(before.name || before.tag)} `
+      + `but ${JSON.stringify((after && (after.name || after.tag)) || 'something else')} is focused now, `
+      + 'so where the characters landed cannot be established.',
+      { hint: 'Click the target with ui_click immediately before ui_type_text, and pass expect_focus so the target is checked first.' },
+    );
+  }
 
   return {
     success: true,
@@ -617,8 +665,14 @@ export async function typeText({ text, expect_focus }) {
     // Say WHERE it went. A caller that wanted the symbol box and hit the Pine
     // editor should be able to see that from the response.
     target: { tag: before.tag, name: before.name, type: before.type },
+    focus_held: sameElement,
     ...(grew === null
-      ? { verified: null, note: 'The focused element exposes no value to read back, so the text could not be confirmed.' }
+      ? {
+        verified: null,
+        note: sameElement === null
+          ? 'The page could not be read back, so the text could not be confirmed.'
+          : 'The focused element exposes no value to read back, so the text could not be confirmed.',
+      }
       : { verified: grew === text.length, chars_added: grew }),
   };
 }

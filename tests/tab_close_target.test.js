@@ -82,3 +82,37 @@ describe('tab_switch index-space honesty', () => {
       'the two index spaces can diverge silently; that divergence destroyed a chart tab');
   });
 });
+
+describe('closeTab proves WHICH tab went, not just that one did', () => {
+  const core = readFileSync(new URL('../src/core/tab.js', import.meta.url), 'utf-8');
+  const body = (() => {
+    const start = core.indexOf('export async function closeTab(');
+    const next = core.indexOf('\nexport ', start + 10);
+    return core.slice(start, next === -1 ? undefined : next);
+  })();
+
+  it('compares the label multiset before and after, not only the count', () => {
+    // The snapshot and the click run in SEPARATE CDP sessions and the click
+    // re-queries .tab.active fresh, so it closes whatever is active at click
+    // time. Reporting `closed: victim` from the stale snapshot on the strength
+    // of a dropped count is a narrower version of the incident that closed the
+    // operator's chart tab, in the function whose header claims to fix it.
+    assert.match(body, /beforeTally|departed/,
+      'the after-check must identify what actually left');
+    assert.match(body, /victimWent/,
+      'it must decide whether the named victim is the tab that went');
+  });
+
+  it('throws when the named victim is still open', () => {
+    assert.match(body, /if \(victimWent === false\)[\s\S]*?throw new ClassifiedError/,
+      'closing the wrong tab must not report success');
+    assert.match(body, /still open/,
+      'the message must say the victim survived');
+  });
+
+  it('does not hardcode verified: true', () => {
+    assert.ok(!/\n\s*verified: true,/.test(body),
+      'verified must come from the label comparison, not be asserted');
+    assert.match(body, /verified: victimWent === true/);
+  });
+});

@@ -29,6 +29,22 @@ Minor, not a patch: two new tools and several changed return shapes.
 
 ### Fixed
 
+- **Two blind external audits (Codex 5.6, Kimi K3) reviewed this release and
+  both returned block.** Nineteen findings, all closed. The sharpest landed on
+  `tv_repair_chart` itself: it returned `success: true` unconditionally and
+  reconnected a pane whose poisoned study it had failed to remove, restarting
+  the very loop it exists to end. Both auditors ranked that first. Also fixed:
+  the study add ignored the EntityId `createStudy` returns and diffed the study
+  list instead; `alert_create_bulk` verified that an id came back but never
+  that the alert was on the requested symbol; a healthy mid-load pane was
+  reported as damaged with advice to run the destructive repair tool;
+  `TV_MCP_NO_CDP` did not cover three modules that reach the browser directly
+  while its comment claimed it covered everything; `layoutSwitch` read its
+  baseline after firing the switch, so it could only fail successful switches;
+  the Pine overwrite guard treated any script under 200 characters as
+  disposable; `closeTab` proved only that the count dropped, never which tab
+  went; and `ui_type_text` never re-checked that focus had held across the
+  write. Every fix is mutation-tested.
 - **A chart pane would break permanently and the only apparent cure was
   rebuilding the layout.** One pane sits in a reconnect loop while the rest of
   the layout is fine. Diagnosed live by instrumenting the chart session:
@@ -167,8 +183,9 @@ Minor, not a patch: two new tools and several changed return shapes.
 
 ### Changed
 
-- `README` corrected: 103 tools and 645 tests, not 102 and 512, and it now
-  documents the watchlist-wide alert sweep.
+- `README` corrected: it claimed 102 tools and 512 tests, and headlined
+  "What is new in 2.2.0" two releases later. It now carries the real counts
+  (106 tools, 732 tests) and documents the watchlist-wide alert sweep.
 
 ## [2.2.6] - 2026-08-20
 

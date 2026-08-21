@@ -41,7 +41,7 @@ args.push(...tests);
 // looking like success.
 //
 // RAISE THIS when you add tests. It is meant to be edited.
-const EXPECTED_MIN_TESTS = 726;
+const EXPECTED_MIN_TESTS = 732;
 
 // HERMETIC. Any core function that reaches the real browser instead of its
 // injected _deps now throws and fails the test that did it. Before this flag,

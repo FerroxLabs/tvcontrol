@@ -22,7 +22,7 @@
 //
 // These tests read the source rather than the DOM because what has to hold is a
 // property of the ORDER the source is written in, which no DOM fixture can pin.
-import { test } from 'node:test';
+import { test, describe, it } from 'node:test';
 import assert from 'node:assert';
 import { readFileSync } from 'node:fs';
 
@@ -65,4 +65,34 @@ test('the open path still verifies instead of assuming', () => {
     'the post-action verification is gone; openPanel is back to claiming success it never checked');
   assert.ok(/PINE_VISIBLE/.test(src),
     'the measured-visibility check is gone; existence in the DOM is not visibility');
+});
+
+describe('ui_type_text pins its target across the write', () => {
+  const ui = readFileSync(new URL('../src/core/ui.js', import.meta.url), 'utf-8');
+  const body = (() => {
+    const start = ui.indexOf('export async function typeText(');
+    const next = ui.indexOf('\nexport ', start + 10);
+    return ui.slice(start, next === -1 ? undefined : next);
+  })();
+
+  it('marks the focused element before typing and checks the mark after', () => {
+    // Focus was checked BEFORE insertText and never again: the read-back took
+    // document.activeElement a second time and compared its length against the
+    // first element's. Autocomplete stealing focus mid-write made `verified` a
+    // coin flip between two different fields while `target` still named the
+    // original. Both external auditors flagged it.
+    assert.match(body, /data-tvcontrol-typing/, 'the target must be tagged');
+    assert.match(body, /same_element/, 'the read-back must check the tag');
+  });
+
+  it('throws rather than reporting success when focus moved', () => {
+    assert.match(body, /if \(sameElement === false\)[\s\S]*?throw new ClassifiedError/,
+      'text landing somewhere unknown must not be a success');
+    assert.match(body, /Focus moved while typing/);
+  });
+
+  it('removes its marker whatever happens', () => {
+    assert.match(body, /finally/, 'the cleanup must not depend on the write succeeding');
+    assert.match(body, /removeAttribute/);
+  });
 });
