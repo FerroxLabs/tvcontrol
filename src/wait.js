@@ -3,6 +3,21 @@ import { evaluate } from './connection.js';
 const DEFAULT_TIMEOUT = 10000;
 const POLL_INTERVAL = 200;
 
+/**
+ * Is `current` the symbol that `expected` asked for?
+ *
+ * TradingView qualifies a bare ticker: ask for BTCUSDT and the chart reports
+ * BINANCE:BTCUSDT. An exact string compare would call that a failure. Two
+ * DIFFERENTLY qualified symbols are still a mismatch, so NASDAQ:AAPL never
+ * matches NYSE:AAPL.
+ *
+ * Exported so pane.js verifies a symbol change by the same rule this file uses.
+ * A second copy of this logic somewhere else is a second copy to drift.
+ */
+export function symbolMatches(current, expected) {
+  return _symbolMatches(current, expected);
+}
+
 function _symbolMatches(current, expected) {
   if (!expected) return true;
   if (!current) return false;

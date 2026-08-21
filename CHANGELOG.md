@@ -29,6 +29,25 @@ Minor, not a patch: two new tools and several changed return shapes.
 
 ### Fixed
 
+- **`pane_set_symbol` could write to the wrong pane and report success.**
+  `pane_focus` clicked `_mainDiv` and then returned `focused: idx` straight
+  from its own argument. Whether the click landed, whether the div existed,
+  whether the chart honoured it: all three produced the same answer. The same
+  failure as the old `tab_switch`, which reported a switch it never performed.
+
+  `pane_set_symbol` built on it: focus, wait 300ms, write to "the now-active
+  chart", return `success: true` echoing the caller's own symbol back. Nothing
+  checked that the focus took, that the symbol changed, or that it changed on
+  the pane that was asked for. A silently failed click meant
+  `pane_set_symbol(1, "X")` rewrote pane 0 and said it had done pane 1.
+
+  `pane_focus` now polls an independent read of which pane is really active and
+  throws rather than reporting a move that did not happen. `pane_set_symbol`
+  records every pane's symbol first, re-confirms the active pane immediately
+  before writing, polls until the symbol lands, and refuses if any other pane
+  changed. It reports `previous` and the symbol TradingView actually settled on
+  rather than the request. Verified live, including the case that matters: with
+  pane 1 active, writing to pane 0 landed on pane 0 and pane 1 was untouched.
 - **A Pine study had no address, so four tools could never reach one.**
   TradingView gives a built-in study a string id ("T4x6LH") and gives every
   Pine study its own distinct empty Array. `getStudyById` resolves that by

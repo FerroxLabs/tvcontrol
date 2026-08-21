@@ -70,7 +70,6 @@ function fakeChart({ studies, removeThrows = false, removeIsNoop = false } = {})
 /** Execute a captured page expression against a fake window. */
 function runInPage(expression, api) {
   const window = { TradingViewApi: { _activeChartWidgetWV: { value: () => api } } };
-  // eslint-disable-next-line no-new-func
   return new Function('window', `return (${expression});`)(window);
 }
 
@@ -297,7 +296,6 @@ describe('snapshot attributes metaInfo to Pine studies', () => {
 
   const run = (expr, api) => {
     const window = { TradingViewApi: { _activeChartWidgetWV: { value: () => api } } };
-    // eslint-disable-next-line no-new-func
     return new Function('window', `return (${expr});`)(window);
   };
 
