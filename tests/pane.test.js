@@ -23,8 +23,11 @@ const paneDeps = ({ evaluate, evaluateAsync } = {}) => ({
  * `writesToPane` sends the symbol write somewhere other than the active pane,
  * reproducing the collateral damage.
  */
-function mockPage({ symbols = ['NASDAQ:AAPL', 'NASDAQ:NVDA'], active = 0, focusWorks = true, writesToPane = null } = {}) {
-  const state = { symbols: [...symbols], active };
+function mockPage({ symbols = ['NASDAQ:AAPL', 'NASDAQ:NVDA'], active = 0, focusWorks = true,
+  writesToPane = null, resolves = true } = {}) {
+  // `resolves: false` reproduces the pane that takes the LABEL but never
+  // resolves the instrument, which is the stuck-on-reconnect state.
+  const state = { symbols: [...symbols], active, resolves };
   const calls = [];
   const evaluate = async (expr) => {
     calls.push(expr);
@@ -39,7 +42,7 @@ function mockPage({ symbols = ['NASDAQ:AAPL', 'NASDAQ:NVDA'], active = 0, focusW
       return { index: state.active, total: state.symbols.length };
     }
     if (expr.includes('mainSeries()') && expr.includes('out.push')) {
-      return state.symbols.map((symbol, index) => ({ index, symbol }));
+      return state.symbols.map((symbol, index) => ({ index, symbol, resolved: state.resolves }));
     }
     return undefined;
   };
@@ -169,6 +172,23 @@ describe('pane management', () => {
     const result = await setSymbol({ index: 0, symbol: 'BTCUSDT', _deps: page._deps });
     assert.equal(result.requested, 'BTCUSDT');
     assert.equal(result.symbol, 'BINANCE:BTCUSDT', 'report what the chart settled on, not the request');
+  });
+
+  it('refuses to report success when the label changed but the symbol never RESOLVED', async () => {
+    // ms.symbol() flips the instant setSymbol is called; ms.symbolInfo() lands
+    // later or never. An earlier version of this function polled the label
+    // alone and returned verified: true on it, which confirmed the request
+    // rather than the result. A pane holding a label with no resolved
+    // instrument is exactly the stuck-on-reconnect state.
+    const page = mockPage({ symbols: ['NASDAQ:AAPL', 'NASDAQ:NVDA'], active: 0, resolves: false });
+    await assert.rejects(
+      setSymbol({ index: 0, symbol: 'NASDAQ:TSLA', _deps: page._deps }),
+      (err) => err instanceof ClassifiedError
+        && /never RESOLVED/.test(err.message)
+        && /label without the instrument/.test(err.message)
+        && /tv_chart_health/.test(err.hint || ''),
+    );
+    assert.equal(page.state.symbols[0], 'NASDAQ:TSLA', 'the label really did change');
   });
 
   it('REFUSES TO WRITE when the focus did not take, so the wrong pane is never changed', async () => {

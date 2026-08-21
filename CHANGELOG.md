@@ -60,6 +60,21 @@ Minor, not a patch: two new tools and several changed return shapes.
   call, and never once produced a registered study. The inject paths now treat
   registration, not the source count going up, as success, remove anything they
   added without registering, and reconnect the session if one of them killed it.
+- **The same session-killing code was left behind in `sweep_parallel.js`.**
+  `strategy_sweep` still called `insertStudyWithoutCheck` and still judged
+  success by the source count going up, so it could poison a pane in exactly
+  the way that was just fixed elsewhere. Removed, registration is the test, an
+  unregistered study is dropped, and the session is reconnected if an attempt
+  killed it. The sweep workers also await `setSymbol` and `setResolution`
+  rather than firing them: a sweep that reads bars before the symbol changed
+  records a wrong number instead of failing visibly.
+- **`pane_set_symbol` verified the label, not the instrument.** It polled
+  `ms.symbol()`, which flips the moment `setSymbol` is called, and reported
+  `verified: true` on it. That confirms the request rather than the result,
+  and a pane holding a label with no resolved instrument is the
+  stuck-on-reconnect state. It now requires `symbolInfo()` to resolve, and
+  distinguishes "the label never changed" from "the label changed but the
+  symbol never resolved" in the error.
 - **Added `tv_chart_health` and `tv_repair_chart`.** Health reports each pane's
   data session and names any study that will kill it on reconnect. Repair
   removes those studies and reconnects the pane, naming everything it removed

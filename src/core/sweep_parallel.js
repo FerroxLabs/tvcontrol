@@ -204,10 +204,95 @@ class SweepWorker {
           var pre_strategy_ids = strategyIds();
           var beforeLen = sources().length;
           var settle = function(ms) { return new Promise(function(r){ setTimeout(r, ms); }); };
-          try { await cw.createStudy(meta); await settle(800); if (sources().length > beforeLen) return { success: true, method: 'createStudy', pre_strategy_ids: pre_strategy_ids }; } catch(e) {}
-          try { var ret = cw._chartWidget.insertStudy(meta, []); if (ret && typeof ret.then === 'function') await ret; await settle(800); if (sources().length > beforeLen) return { success: true, method: 'insertStudy', pre_strategy_ids: pre_strategy_ids }; } catch(e) {}
-          try { cw.insertStudyWithoutCheck(meta, inputs, false, [], null); await settle(800); if (sources().length > beforeLen) return { success: true, method: 'insertStudyWithoutCheck', pre_strategy_ids: pre_strategy_ids }; } catch(e) {}
-          return { success: false, sources_before: beforeLen, sources_after: sources().length, pre_strategy_ids: pre_strategy_ids };
+
+          // THIS BLOCK WAS THE SAME SESSION-KILLING CODE THAT WAS REMOVED FROM
+          // state.js, LEFT BEHIND IN A SECOND FILE.
+          //
+          // It judged success by sources().length > beforeLen and, failing
+          // that, called insertStudyWithoutCheck. A study can be present on the
+          // chart having never registered with the server, in which case its id
+          // is [] rather than a string. On the pane's next reconnect the chart
+          // replays create_study with that [], the server answers "Invalid
+          // parameters" as a CRITICAL error, and the chart session is
+          // destroyed. The pane then loops on reconnect and cannot self-heal,
+          // because symbolSameAsResolved() returns true while symbolInfo() is
+          // null so re-setting the same symbol is a silent no-op.
+          //
+          // MEASURED 2026-08-21: insertStudyWithoutCheck took a healthy pane
+          // from session cs_VmBPx3nc31XM state 2 to sessionId "" state 0 in a
+          // single call, and never once produced a REGISTERED study.
+          //
+          // Registration is the test now, and the path that cannot register is
+          // gone. A sweep that leaves the operator's chart permanently broken
+          // has not succeeded at anything.
+          var usableCount = function() {
+            var srcs = sources(), n = 0;
+            for (var i = 0; i < srcs.length; i++) {
+              try {
+                if (!srcs[i].metaInfo) continue;
+                var idv = (typeof srcs[i].id === 'function') ? srcs[i].id() : null;
+                if (typeof idv === 'string' && idv.length > 0) n++;
+              } catch (e) {}
+            }
+            return n;
+          };
+          var beforeUsable = usableCount();
+          var registered = function() { return usableCount() > beforeUsable; };
+          var dropUnregistered = function() {
+            try {
+              var mm = cw._chartWidget.model().model();
+              var srcs = mm.dataSources();
+              for (var i = srcs.length - 1; i >= 0; i--) {
+                try {
+                  var src = srcs[i];
+                  if (!src.metaInfo) continue;
+                  var mi = src.metaInfo();
+                  if (!mi || String(mi.description) !== String(meta.description)) continue;
+                  var idv = (typeof src.id === 'function') ? src.id() : null;
+                  if (typeof idv === 'string' && idv.length > 0) continue;
+                  mm.removeSource(src);
+                  return true;
+                } catch (e) {}
+              }
+            } catch (e) {}
+            return false;
+          };
+          var tried = [];
+
+          try {
+            tried.push('createStudy');
+            await cw.createStudy(meta);
+            await settle(800);
+            if (registered()) return { success: true, method: 'createStudy', pre_strategy_ids: pre_strategy_ids };
+            if (sources().length > beforeLen) tried.push('createStudy:added_but_unregistered' + (dropUnregistered() ? ':removed' : ':COULD_NOT_REMOVE'));
+          } catch(e) { tried.push('createStudy:' + String(e && e.message).slice(0, 60)); }
+
+          try {
+            tried.push('insertStudy');
+            var ret = cw._chartWidget.insertStudy(meta, []);
+            if (ret && typeof ret.then === 'function') await ret;
+            await settle(800);
+            if (registered()) return { success: true, method: 'insertStudy', pre_strategy_ids: pre_strategy_ids };
+            if (sources().length > beforeLen) tried.push('insertStudy:added_but_unregistered' + (dropUnregistered() ? ':removed' : ':COULD_NOT_REMOVE'));
+          } catch(e) { tried.push('insertStudy:' + String(e && e.message).slice(0, 60)); }
+
+          // Nothing registered. If an attempt killed the session on the way
+          // through, bring it back rather than leaving a worker on a dead pane.
+          var sessionRecovered = null;
+          try {
+            var cs = cw._chartWidget && cw._chartWidget._chartSession;
+            if (cs && !String(cs._sessionId || '')) {
+              cs.connect();
+              await settle(2500);
+              sessionRecovered = !!String(cs._sessionId || '');
+            }
+          } catch (e) { sessionRecovered = false; }
+
+          return { success: false, reason: 'no_path_registered_a_study', tried: tried,
+                   sources_before: beforeLen, sources_after: sources().length,
+                   usable_before: beforeUsable, usable_after: usableCount(),
+                   session_recovered: sessionRecovered,
+                   pre_strategy_ids: pre_strategy_ids };
         } catch(e) { return { success: false, reason: 'eval_error', error: e.message }; }
       })()
     `, { awaitPromise: true });
@@ -252,16 +337,50 @@ class SweepWorker {
     `);
   }
 
+  /**
+   * AWAIT IT. setSymbol and setResolution both return Promises in the live
+   * build. Firing them and moving on means the sweep can read bars, run a
+   * strategy and record a result for the PREVIOUS symbol, which is a silently
+   * wrong number rather than a visible failure.
+   */
+  async _awaitedCall(call, label) {
+    const result = await this.evaluate(`
+      (function() {
+        return new Promise(function(resolve) {
+          var settled = false;
+          var done = function(v) { if (!settled) { settled = true; resolve(v); } };
+          setTimeout(function() { done({ ok: false, reason: 'timeout' }); }, 20000);
+          try {
+            var p = ${call};
+            if (p && typeof p.then === 'function') {
+              p.then(function() { done({ ok: true }); },
+                     function(e) { done({ ok: false, reason: 'rejected', error: String(e && e.message || e) }); });
+            } else { done({ ok: true, sync: true }); }
+          } catch (e) { done({ ok: false, reason: 'threw', error: e.message }); }
+        });
+      })()
+    `, { awaitPromise: true });
+    if (result && result.ok === false && result.reason !== 'timeout') {
+      throw new ClassifiedError(
+        CATEGORIES.API_UNEXPECTED,
+        `${label} failed in a sweep worker: ${result.error || result.reason}`,
+      );
+    }
+    return result;
+  }
+
   async setSymbol(symbol) {
-    return await this.evaluate(`
-      window.TradingViewApi._activeChartWidgetWV.value().setSymbol(${JSON.stringify(symbol)})
-    `);
+    return this._awaitedCall(
+      `window.TradingViewApi._activeChartWidgetWV.value().setSymbol(${JSON.stringify(symbol)})`,
+      `setSymbol(${symbol})`,
+    );
   }
 
   async setTimeframe(timeframe) {
-    return await this.evaluate(`
-      window.TradingViewApi._activeChartWidgetWV.value().setResolution(${JSON.stringify(String(timeframe))})
-    `);
+    return this._awaitedCall(
+      `window.TradingViewApi._activeChartWidgetWV.value().setResolution(${JSON.stringify(String(timeframe))})`,
+      `setResolution(${timeframe})`,
+    );
   }
 
   async setInputs(entityId, inputs) {

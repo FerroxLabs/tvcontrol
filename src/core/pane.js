@@ -94,7 +94,18 @@ async function _readActivePane(deps) {
   return observed;
 }
 
-/** Symbol per pane index, as a plain map, for before/after comparison. */
+/**
+ * Symbol per pane index, plus whether that symbol actually RESOLVED.
+ *
+ * ms.symbol() is the label the chart was asked for, and it flips the instant
+ * setSymbol is called. ms.symbolInfo() is the instrument the server resolved,
+ * and it lands later or not at all. An earlier version of setSymbol below
+ * polled the label only and reported verified: true on it, which meant it
+ * confirmed a request rather than a result and returned while the pane was
+ * still resolving. Anything acting in that window races the resolution, and a
+ * pane whose symbol never resolves is the stuck-on-reconnect state described in
+ * core/session_health.js.
+ */
 async function _paneSymbols(deps) {
   const rows = await deps.evaluate(`
     (function() {
@@ -105,8 +116,10 @@ async function _paneSymbols(deps) {
         try {
           var m = all[i].model ? all[i].model() : null;
           var ms = m ? m.mainSeries() : null;
-          out.push({ index: i, symbol: ms ? ms.symbol() : null });
-        } catch (e) { out.push({ index: i, symbol: null, error: e.message }); }
+          var resolved = false;
+          try { resolved = ms ? (ms.symbolInfo() !== null) : false; } catch (e) { resolved = false; }
+          out.push({ index: i, symbol: ms ? ms.symbol() : null, resolved: resolved });
+        } catch (e) { out.push({ index: i, symbol: null, resolved: false, error: e.message }); }
       }
       return out;
     })()
@@ -115,7 +128,7 @@ async function _paneSymbols(deps) {
     throw new ClassifiedError(CATEGORIES.API_UNEXPECTED, 'Could not read pane symbols: the page returned nothing.');
   }
   const map = {};
-  for (const r of rows) map[r.index] = r.symbol;
+  for (const r of rows) map[r.index] = { symbol: r.symbol, resolved: !!r.resolved };
   return map;
 }
 
@@ -371,15 +384,17 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
   for (let attempt = 1; attempt <= SYMBOL_POLL_ATTEMPTS; attempt += 1) {
     await deps.wait(SYMBOL_POLL_MS);
     after = await _paneSymbols(deps);
-    if (symbolMatches(after[idx], cleanSymbol)) { matched = true; break; }
+    // BOTH conditions. The label matching says the request was accepted; the
+    // resolution says the chart actually has the instrument.
+    if (symbolMatches(after[idx].symbol, cleanSymbol) && after[idx].resolved) { matched = true; break; }
   }
 
   // Say what moved that should not have, whether or not the target took. A
   // collateral change is the more serious finding of the two.
   const collateral = Object.keys(after)
     .map(Number)
-    .filter((i) => i !== idx && String(before[i] ?? '') !== String(after[i] ?? ''))
-    .map((i) => ({ index: i, was: before[i] ?? null, now: after[i] ?? null }));
+    .filter((i) => i !== idx && String(before[i]?.symbol ?? '') !== String(after[i]?.symbol ?? ''))
+    .map((i) => ({ index: i, was: before[i]?.symbol ?? null, now: after[i]?.symbol ?? null }));
 
   if (collateral.length > 0) {
     throw new ClassifiedError(
@@ -391,11 +406,19 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
   }
 
   if (!matched) {
+    const labelOk = symbolMatches(after[idx]?.symbol, cleanSymbol);
     throw new ClassifiedError(
       CATEGORIES.CHART_LOADING,
-      `Set pane ${idx} to "${cleanSymbol}" but after ` +
-      `${(SYMBOL_POLL_ATTEMPTS * SYMBOL_POLL_MS) / 1000}s it still reads "${after[idx] ?? 'unreadable'}".`,
-      { hint: 'The symbol may not exist on this account, or the chart is still loading. Run pane_list to see the current state.' },
+      labelOk
+        ? `Pane ${idx} now reads "${after[idx].symbol}" but the symbol never RESOLVED after ` +
+          `${(SYMBOL_POLL_ATTEMPTS * SYMBOL_POLL_MS) / 1000}s: the chart has the label without the instrument.`
+        : `Set pane ${idx} to "${cleanSymbol}" but after ` +
+          `${(SYMBOL_POLL_ATTEMPTS * SYMBOL_POLL_MS) / 1000}s it still reads "${after[idx]?.symbol ?? 'unreadable'}".`,
+      {
+        hint: labelOk
+          ? 'A pane with a label but no resolved symbol is the stuck-on-reconnect state. Run tv_chart_health.'
+          : 'The symbol may not exist on this account, or the chart is still loading. Run pane_list to see the current state.',
+      },
     );
   }
 
@@ -405,10 +428,12 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
     // The symbol TradingView settled on, which may be qualified: ask for
     // BTCUSDT and get BINANCE:BTCUSDT. Report both rather than echoing the
     // request as though it were the result.
-    symbol: after[idx],
+    symbol: after[idx].symbol,
     requested: cleanSymbol,
-    previous: before[idx] ?? null,
+    previous: before[idx]?.symbol ?? null,
+    // verified means the instrument resolved, not merely that the label changed.
     verified: true,
+    symbol_resolved: true,
     other_panes_unchanged: true,
   };
 }
