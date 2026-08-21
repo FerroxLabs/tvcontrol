@@ -5,12 +5,33 @@ import * as watchdog from '../core/watchdog.js';
 import { update } from '../core/update.js';
 import { getCapabilityMatrix } from '../core/capabilities.js';
 import { createSupportBundle } from '../core/support.js';
+import * as sessionHealth from '../core/session_health.js';
 
 export function registerHealthTools(server) {
   server.tool('tv_health_check', 'Check CDP, TradingView market-data connection, compatibility, and current chart state', {}, async () => {
     try { return jsonResult(await core.healthCheck()); }
     catch (err) { return jsonResult({ success: false, error: err.message, hint: 'TradingView is not running with CDP enabled. Use the tv_launch tool to start it automatically.' }, true); }
   });
+
+  server.tool('tv_chart_health',
+    'Check whether each chart pane has a live data session. Finds the failure where ONE pane sits in a reconnect loop forever while the rest of the layout is fine: a study whose id never registered with the server kills that pane\'s session on every reconnect, and the pane cannot recover on its own. Read-only. Use tv_repair_chart to fix what this reports.',
+    {}, async () => {
+      try { return jsonResult(await sessionHealth.inspect()); }
+      catch (err) { return errorResult(err); }
+    });
+
+  server.tool('tv_repair_chart',
+    'Repair a chart pane stuck in a reconnect loop, without rebuilding the layout. Removes the studies whose id never registered with the server (they are what kill the session on every reconnect) and reconnects the pane. Names every study it removes so you can add them back with indicator_add_from_search. Run tv_chart_health first, or pass dry_run to see the plan.',
+    {
+      pane: z.number().int().min(0).max(15).optional()
+        .describe('Pane index to repair (from tv_chart_health). Omit to repair every affected pane.'),
+      dry_run: z.boolean().optional()
+        .describe('Report what would be removed without changing anything.'),
+    },
+    async ({ pane, dry_run }) => {
+      try { return jsonResult(await sessionHealth.repair({ pane: pane === undefined ? null : pane, dry_run: !!dry_run })); }
+      catch (err) { return errorResult(err); }
+    });
 
   server.tool('tv_discover', 'Report which known TradingView API paths are available and their methods', {}, async () => {
     try { return jsonResult(await core.discover()); }

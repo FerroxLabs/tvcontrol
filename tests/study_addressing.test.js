@@ -1,5 +1,15 @@
 /**
- * A PINE STUDY HAD NO ADDRESS.
+ * A DAMAGED STUDY HAD NO ADDRESS.
+ *
+ * CORRECTION: this file first said an empty-array id was simply how
+ * TradingView represents Pine studies. It is not. Measured on two panes of one
+ * layout, the healthy pane's Pine studies had ids "Uqd28X" and "rExi1w" and the
+ * broken pane's had []. The empty Array means the study never registered with
+ * the server, and it destroys that pane's chart session on the next reconnect.
+ * See tests/session_health.test.js.
+ *
+ * What follows is still accurate about the SHAPE of the damaged value and why
+ * a study in that state can only be reached from inside the page.
  *
  * Measured against TradingView Desktop on 2026-08-21:
  *
@@ -152,14 +162,19 @@ describe('chart.getState() stops handing out an unusable id', () => {
     return evaluate.calls[0];
   };
 
-  it('reports null, not [], for a study TradingView gives no serializable id', async () => {
+  it('reports null, not [], for a study that never registered with the server', async () => {
     const expr = await capture();
     const { api } = fakeChart({ studies: STUDIES });
     const state = runInPage(expr, api);
     const pine = state.studies.find((s) => s.name === 'TC-RTA V6');
     assert.equal(pine.id, null, 'an empty array must never be presented as an entity_id');
     assert.equal(pine.addressable_by, 'name');
-    assert.match(pine.id_note, /Pass its name as entity_id/);
+    // The note has to say this is DAMAGE and point at the repair. Calling it
+    // a Pine quirk, which an earlier version did, teaches the caller to route
+    // around a study that is actively destroying their chart session.
+    assert.match(pine.id_note, /never finished registering/);
+    assert.match(pine.id_note, /tv_repair_chart/);
+    assert.match(pine.id_note, /addressed by name/);
     assert.equal(pine.script_id, 'Script$USER;aaa@tv-scripting');
   });
 

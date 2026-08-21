@@ -29,8 +29,66 @@ function _resolve(deps) {
 }
 
 /**
- * A PINE STUDY'S id IS AN EMPTY ARRAY, AND IT USED TO BE HANDED STRAIGHT TO THE
- * CALLER AS entity_id.
+ * AWAIT THE PROMISE. THIS IS THE BUG BEHIND THE BROKEN-PANE REPORTS.
+ *
+ * TradingView changed these to return Promises (createStudy returns
+ * Promise<EntityId> as of charting library 1.15; the callback argument was
+ * removed). Confirmed in the live Desktop build on 2026-08-21:
+ *
+ *     createStudy            async: true
+ *     createMultipointShape  async: true
+ *     setSymbol              async: true
+ *     setResolution          async: true
+ *
+ * Calling them fire-and-forget and then sleeping a fixed interval before
+ * reading the result is a race. Win it and everything looks fine. Lose it and
+ * the study exists on the chart with NO server id, its id reads as [], and on
+ * the pane's next reconnect create_study is sent with that [] and the server
+ * answers "Invalid parameters" as a CRITICAL error, which destroys the chart
+ * session. The pane then loops on reconnect forever and cannot recover: while
+ * it is in that state symbolSameAsResolved() returns true, so re-setting the
+ * same symbol is a silent no-op.
+ *
+ * That is why it struck at random and why the only apparent cure was rebuilding
+ * the layout. See core/session_health.js for detection and repair.
+ *
+ * Builds an expression that resolves only when the call really finished.
+ * `timeoutMs` bounds it so a hung call reports rather than hanging the tool.
+ */
+function awaited(call, timeoutMs = 15000) {
+  return `
+    (function() {
+      return new Promise(function(resolve) {
+        var settled = false;
+        var done = function(v) { if (!settled) { settled = true; resolve(v); } };
+        setTimeout(function() { done({ ok: false, reason: 'timeout' }); }, ${Number(timeoutMs)});
+        try {
+          var p = ${call};
+          if (p && typeof p.then === 'function') {
+            p.then(function(r) { done({ ok: true, value: (typeof r === 'string' || typeof r === 'number' || typeof r === 'boolean') ? r : null }); },
+                   function(e) { done({ ok: false, reason: 'rejected', error: String(e && e.message || e) }); });
+          } else {
+            done({ ok: true, value: (typeof p === 'string' || typeof p === 'number' || typeof p === 'boolean') ? p : null, sync: true });
+          }
+        } catch (e) { done({ ok: false, reason: 'threw', error: e.message }); }
+      });
+    })()
+  `;
+}
+
+/**
+ * A STUDY WITH NO id IS DAMAGED, AND IT USED TO BE REPORTED AS THOUGH IT WERE
+ * NORMAL.
+ *
+ * CORRECTION: an earlier version of this note claimed TradingView gives every
+ * Pine study an empty Array as its id. It does not. Measured on two panes of
+ * one layout: the healthy pane's Pine studies had ids "Uqd28X" and "rExi1w",
+ * the broken pane's had []. The empty Array means the study never registered
+ * with the server, and such a study destroys its pane's chart session on the
+ * next reconnect. It is reported here so the caller is warned, not so it can be
+ * worked around. See core/session_health.js.
+ *
+ * The original note, still true, follows.
  *
  * Measured 2026-08-21 against TradingView Desktop: getAllStudies() gives
  * built-ins a string id ("T4x6LH") and gives every Pine study its own distinct
@@ -74,7 +132,9 @@ export async function getState({ _deps } = {}) {
           var out = { id: usable ? s.id : null, name: name };
           if (!usable) {
             out.addressable_by = 'name';
-            out.id_note = 'TradingView gives this study no serializable id (Pine). Pass its name as entity_id.';
+            out.id_note = 'This study has NO server id, which means it never finished registering. It will ' +
+              'destroy this pane\\'s data session on the next reconnect. Run tv_repair_chart. Until then it ' +
+              'can only be addressed by name.';
             var mi2 = dsByDesc[name];
             if (mi2 && mi2.id) out.script_id = String(mi2.id);
           }
@@ -94,36 +154,81 @@ export async function getState({ _deps } = {}) {
         chart_type: chart.chartType(),
         chartType: chart.chartType(),
         studies: studies,
+        // A BROKEN PANE LOOKS EXACTLY LIKE A WORKING ONE FROM UP HERE.
+        // symbol() and the study list keep answering while the pane's data
+        // session is dead and it loops on reconnect forever. Report the
+        // session so the caller is told rather than left guessing.
+        _session: (function() {
+          try {
+            var w = chart._chartWidget;
+            var cs = w && w._chartSession;
+            var ms = w.model().model().mainSeries();
+            var resolved = true;
+            try { resolved = ms.symbolInfo() !== null; } catch (e) { resolved = false; }
+            return {
+              id: cs ? String(cs._sessionId || '') : '',
+              state: cs ? cs._state : null,
+              resolved: resolved
+            };
+          } catch (e) { return null; }
+        })(),
       };
     })()
   `);
-  return { success: true, ...state };
+  const { _session, ...rest } = state || {};
+  const out = { success: true, ...rest };
+
+  // Surface the failure that otherwise costs someone their whole layout.
+  const broken = [];
+  const poisoned = (out.studies || []).filter((st) => st.id === null && st.addressable_by === 'name');
+  if (_session && !_session.id) broken.push('this pane has no live data session, so it cannot load bars');
+  if (_session && _session.resolved === false) broken.push(`the symbol ${out.symbol} never resolved`);
+  if (poisoned.length > 0) {
+    broken.push(
+      `${poisoned.length} stud${poisoned.length === 1 ? 'y has' : 'ies have'} no server id ` +
+      `(${poisoned.map((st) => JSON.stringify(st.name)).join(', ')}), which kills this pane's ` +
+      'session every time it reconnects',
+    );
+  }
+  if (broken.length > 0) {
+    out.chart_health = {
+      healthy: false,
+      problems: broken,
+      fix: 'This pane cannot recover on its own: re-setting the same symbol is a silent no-op while it ' +
+           'is in this state. Run tv_repair_chart to remove the unregistered studies and reconnect. ' +
+           'Rebuilding the layout is not necessary.',
+    };
+  }
+  return out;
 }
 
 export async function setSymbol({ symbol, _deps }) {
   const { evaluateAsync, waitForChartReady } = _resolve(_deps);
-  await evaluateAsync(`
-    (function() {
-      var chart = ${CHART_API};
-      return new Promise(function(resolve) {
-        chart.setSymbol(${safeString(symbol)}, {});
-        setTimeout(resolve, 500);
-      });
-    })()
-  `);
+  const applied = await evaluateAsync(awaited(
+    `${CHART_API}.setSymbol(${safeString(symbol)}, {})`,
+  ));
+  if (applied && applied.ok === false && applied.reason !== 'timeout') {
+    throw new ClassifiedError(
+      CATEGORIES.API_UNEXPECTED,
+      `setSymbol(${symbol}) failed: ${applied.error || applied.reason}`,
+    );
+  }
   const ready = await waitForChartReady(symbol);
   if (!ready) throw new ClassifiedError(CATEGORIES.CHART_LOADING, `Chart did not finish loading symbol ${symbol}`);
   return { success: true, symbol, chart_ready: ready };
 }
 
 export async function setTimeframe({ timeframe, _deps }) {
-  const { evaluate, waitForChartReady } = _resolve(_deps);
-  await evaluate(`
-    (function() {
-      var chart = ${CHART_API};
-      chart.setResolution(${safeString(timeframe)}, {});
-    })()
-  `);
+  const { evaluateAsync, waitForChartReady } = _resolve(_deps);
+  const applied = await evaluateAsync(awaited(
+    `${CHART_API}.setResolution(${safeString(timeframe)}, {})`,
+  ));
+  if (applied && applied.ok === false && applied.reason !== 'timeout') {
+    throw new ClassifiedError(
+      CATEGORIES.API_UNEXPECTED,
+      `setResolution(${timeframe}) failed: ${applied.error || applied.reason}`,
+    );
+  }
   const ready = await waitForChartReady(null, timeframe);
   if (!ready) throw new ClassifiedError(CATEGORIES.CHART_LOADING, `Chart did not finish loading timeframe ${timeframe}`);
   return { success: true, timeframe, chart_ready: ready };
@@ -150,7 +255,7 @@ export async function setType({ chart_type, _deps }) {
 }
 
 export async function manageIndicator({ action, indicator, entity_id, inputs: inputsRaw, _deps }) {
-  const { evaluate, sleep } = _resolve(_deps);
+  const { evaluate, evaluateAsync, sleep } = _resolve(_deps);
   let inputs;
   try {
     inputs = inputsRaw ? (typeof inputsRaw === 'string' ? JSON.parse(inputsRaw) : inputsRaw) : undefined;
@@ -168,13 +273,23 @@ export async function manageIndicator({ action, indicator, entity_id, inputs: in
   if (action === 'add') {
     const inputArr = inputs ? Object.entries(inputs).map(([k, v]) => ({ id: k, value: v })) : [];
     const before = await evaluate(`${CHART_API}.getAllStudies().map(function(s) { return s.id; })`);
-    await evaluate(`
-      (function() {
-        var chart = ${CHART_API};
-        chart.createStudy(${safeString(indicator)}, false, false, ${JSON.stringify(inputArr)});
-      })()
-    `);
-    await sleep(1500);
+    // AWAIT createStudy. It returns Promise<EntityId>. Firing it and sleeping
+    // 1500ms was a race, and losing that race leaves a study with no server id
+    // that destroys the pane's chart session on its next reconnect. See the
+    // note above awaited().
+    const created = await evaluateAsync(awaited(
+      `${CHART_API}.createStudy(${safeString(indicator)}, false, false, ${JSON.stringify(inputArr)})`,
+    ));
+    if (created && created.ok === false && created.reason !== 'timeout') {
+      throw new ClassifiedError(
+        CATEGORIES.TV_UI_CHANGED,
+        `createStudy("${indicator}") failed: ${created.error || created.reason}`,
+        { hint: 'Use the FULL indicator name (e.g. "Relative Strength Index", not "RSI").' },
+      );
+    }
+    // The promise resolving is the signal. The settle is now a short courtesy
+    // for the study list to reflect it, not the thing correctness rests on.
+    await sleep(250);
     const after = await evaluate(`${CHART_API}.getAllStudies().map(function(s) { return s.id; })`);
     const newIds = (after || []).filter(id => !(before || []).includes(id));
     if (newIds.length === 0) {
@@ -188,7 +303,51 @@ export async function manageIndicator({ action, indicator, entity_id, inputs: in
         { hint: 'Use the FULL indicator name (e.g. "Relative Strength Index", not "RSI"). If the name is correct, the add may have exceeded the settle window — re-check chart_get_state before retrying so you do not add a duplicate.' },
       );
     }
-    return { success: true, action: 'add', indicator, entity_id: newIds[0], new_study_count: newIds.length };
+    // NEVER LEAVE A LANDMINE.
+    //
+    // A study whose id is not a usable string never registered with the server.
+    // It looks fine on screen and it will kill this pane's chart session the
+    // next time the pane reconnects, at which point the pane loops forever and
+    // the operator ends up rebuilding the layout. Reporting
+    // `entity_id: []` and success, which is what this did, is the worst
+    // outcome: the damage is deferred and untraceable.
+    //
+    // Take it back out and say so.
+    const usable = newIds.filter((id) => typeof id === 'string' && id.length > 0);
+    if (usable.length === 0) {
+      const cleanup = await evaluate(`
+        (function() {
+          try {
+            var mm = ${CHART_API}._chartWidget.model().model();
+            var srcs = mm.dataSources();
+            for (var i = srcs.length - 1; i >= 0; i--) {
+              try {
+                var mi = srcs[i].metaInfo && srcs[i].metaInfo();
+                if (!mi || String(mi.description) !== ${safeString(indicator)}) continue;
+                var idv = null;
+                try { idv = (typeof srcs[i].id === 'function') ? srcs[i].id() : null; } catch (e) {}
+                if (typeof idv === 'string' && idv.length > 0) continue;
+                mm.removeSource(srcs[i]);
+                return { removed: true };
+              } catch (e) {}
+            }
+            return { removed: false };
+          } catch (e) { return { removed: false, error: e.message }; }
+        })()
+      `);
+      throw new ClassifiedError(
+        CATEGORIES.TV_UI_CHANGED,
+        `"${indicator}" was added to the chart but TradingView never gave it a server id, ` +
+        'so it would have destroyed this pane\'s data session on the next reconnect. ' +
+        `It has been ${cleanup && cleanup.removed ? 'removed again' : 'LEFT ON THE CHART because it could not be removed'}.`,
+        {
+          hint: cleanup && cleanup.removed
+            ? 'Retry the add. If it keeps happening, the chart session is probably already unhealthy: run tv_chart_health.'
+            : 'Run tv_repair_chart to remove it before the pane reconnects.',
+        },
+      );
+    }
+    return { success: true, action: 'add', indicator, entity_id: usable[0], new_study_count: usable.length };
   } else if (action === 'remove') {
     if (!entity_id) throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'entity_id required for remove action. Use chart_get_state to find study IDs.');
     // REMOVE USED TO RETURN A HARDCODED SUCCESS. It called removeEntity() and

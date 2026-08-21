@@ -817,6 +817,63 @@ export async function injectPublishedStudy({ metaInfo, inputs = {}, _deps } = {}
         var tried = [];
         var settle = function(ms) { return new Promise(function(r){ setTimeout(r, ms); }); };
 
+        // "THE SOURCE COUNT WENT UP" IS NOT SUCCESS.
+        //
+        // Every path below used to be judged by sources() > beforeCount. A
+        // study can be present on the chart and never have registered with the
+        // server, in which case its id is [] instead of a string. That study
+        // looks perfect, and it destroys this pane's chart session the next
+        // time the pane reconnects: create_study is replayed with the [] and
+        // the server answers "Invalid parameters" as a CRITICAL error. The
+        // pane then loops on reconnect forever and cannot self-heal, because
+        // symbolSameAsResolved() returns true while symbolInfo() is null, so
+        // re-setting the same symbol is a silent no-op.
+        //
+        // MEASURED 2026-08-21: insertStudyWithoutCheck took a healthy pane
+        // (cs_VmBPx3nc31XM, state 2) to sessionId "" and state 0 in one call.
+        //
+        // Registration is the test now, not presence.
+        var usableCount = function() {
+          try {
+            var srcs = cw._chartWidget.model().model().dataSources();
+            var n = 0;
+            for (var i = 0; i < srcs.length; i++) {
+              try {
+                if (!srcs[i].metaInfo) continue;
+                var idv = (typeof srcs[i].id === 'function') ? srcs[i].id() : null;
+                if (typeof idv === 'string' && idv.length > 0) n++;
+              } catch (e) {}
+            }
+            return n;
+          } catch (e) { return 0; }
+        };
+        var beforeUsable = usableCount();
+
+        // Remove a source that was added without registering, so a failed path
+        // does not leave a landmine behind for the next path or for the user.
+        var dropUnregistered = function() {
+          try {
+            var mm = cw._chartWidget.model().model();
+            var srcs = mm.dataSources();
+            for (var i = srcs.length - 1; i >= 0; i--) {
+              try {
+                var src = srcs[i];
+                if (!src.metaInfo) continue;
+                var mi = src.metaInfo();
+                if (!mi || String(mi.description) !== String(meta.description)) continue;
+                var idv = (typeof src.id === 'function') ? src.id() : null;
+                if (typeof idv === 'string' && idv.length > 0) continue;
+                mm.removeSource(src);
+                return true;
+              } catch (e) {}
+            }
+          } catch (e) {}
+          return false;
+        };
+
+        // A path succeeded only if it produced a source the server knows about.
+        var registered = function() { return usableCount() > beforeUsable; };
+
         // Find the most recently inserted strategy-bearing source and apply
         // the snapshot inputs to it. Without this the study is on chart but
         // never re-runs because its encoded source input is empty.
@@ -845,9 +902,14 @@ export async function injectPublishedStudy({ metaInfo, inputs = {}, _deps } = {}
           tried.push('createStudy');
           await cw.createStudy(meta);
           await settle(800);
-          if (sources() > beforeCount) {
+          if (registered()) {
             await applyInputs();
-            return { success: true, method: 'createStudy', delta: sources() - beforeCount };
+            return { success: true, method: 'createStudy', delta: sources() - beforeCount, registered: true };
+          }
+          // Present but unregistered: a landmine. Take it back out before
+          // trying the next path, or they stack up.
+          if (sources() > beforeCount) {
+            tried.push('createStudy:added_but_unregistered' + (dropUnregistered() ? ':removed' : ':COULD_NOT_REMOVE'));
           }
         } catch(e) { tried.push('createStudy:' + (e.message || String(e)).slice(0, 80)); }
 
@@ -861,23 +923,49 @@ export async function injectPublishedStudy({ metaInfo, inputs = {}, _deps } = {}
           var ret = cw._chartWidget.insertStudy(meta, inputsArr);
           if (ret && typeof ret.then === 'function') await ret;
           await settle(800);
-          if (sources() > beforeCount) {
+          if (registered()) {
             await applyInputs();
-            return { success: true, method: 'insertStudy', delta: sources() - beforeCount };
+            return { success: true, method: 'insertStudy', delta: sources() - beforeCount, registered: true };
+          }
+          // Present but unregistered: a landmine. Take it back out before
+          // trying the next path, or they stack up.
+          if (sources() > beforeCount) {
+            tried.push('insertStudy:added_but_unregistered' + (dropUnregistered() ? ':removed' : ':COULD_NOT_REMOVE'));
           }
         } catch(e) { tried.push('insertStudy:' + (e.message || String(e)).slice(0, 80)); }
 
-        try {
-          tried.push('insertStudyWithoutCheck');
-          cw.insertStudyWithoutCheck(meta, inputs, false, [], null);
-          await settle(800);
-          if (sources() > beforeCount) {
-            await applyInputs();
-            return { success: true, method: 'insertStudyWithoutCheck', delta: sources() - beforeCount };
-          }
-        } catch(e) { tried.push('insertStudyWithoutCheck:' + (e.message || String(e)).slice(0, 80)); }
+        // PATH C (insertStudyWithoutCheck) IS GONE, DELIBERATELY.
+        //
+        // "WithoutCheck" is exactly what it says: it puts a study on the chart
+        // while bypassing the registration that gives it a server id. Measured
+        // 2026-08-21, it took a healthy pane from session cs_VmBPx3nc31XM
+        // state 2 to sessionId "" state 0 in a single call, and the study it
+        // left behind had id [] and would have killed that pane's session on
+        // every reconnect from then on.
+        //
+        // It never once produced a REGISTERED study in testing. Its only
+        // observed effect was to make the count go up, which is what made the
+        // old success test believe it had worked. Restoring a private Pine
+        // script is not worth trading a working chart for, and there is a path
+        // that does work: indicator_add_from_search goes through the real
+        // indicator dialog and comes back with a proper id.
 
-        return { success: false, reason: 'no_path_added_source', tried: tried, sources_before: beforeCount, sources_after: sources() };
+        // Nothing registered. If an attempt above killed the session on the
+        // way through, bring it back rather than leaving the pane stuck.
+        var sessionRecovered = null;
+        try {
+          var cs = cw._chartWidget && cw._chartWidget._chartSession;
+          if (cs && !String(cs._sessionId || '')) {
+            cs.connect();
+            await settle(2500);
+            sessionRecovered = !!String(cs._sessionId || '');
+          }
+        } catch (e) { sessionRecovered = false; }
+
+        return { success: false, reason: 'no_path_registered_a_study', tried: tried,
+                 sources_before: beforeCount, sources_after: sources(),
+                 usable_before: beforeUsable, usable_after: usableCount(),
+                 session_recovered: sessionRecovered };
       } catch(e) { return { success: false, reason: 'eval_error', error: e.message }; }
     })()
   `);
@@ -886,9 +974,16 @@ export async function injectPublishedStudy({ metaInfo, inputs = {}, _deps } = {}
     return {
       success: false,
       reason: result?.reason || 'unknown',
-      hint: 'TradingView did not register a new study after the inject attempts. The captured metaInfo may be from a different TradingView version. Try reloading the layout manually as a fallback.',
+      hint: 'TradingView did not REGISTER a new study after the inject attempts. A study that appears ' +
+        'on the chart without a server id is not a success: it destroys the pane\'s data session on the ' +
+        'next reconnect, so any such study was removed again rather than left behind. Add the indicator ' +
+        'with indicator_add_from_search instead, which goes through the indicator dialog and registers ' +
+        'properly. Run tv_chart_health if a pane already looks stuck.',
       tried: result?.tried,
       error: result?.error,
+      ...(result?.session_recovered !== null && result?.session_recovered !== undefined
+        ? { session_recovered: result.session_recovered }
+        : {}),
     };
   }
 

@@ -1,40 +1,44 @@
 /**
- * Resolving a study by reference, because Pine studies have no id.
+ * Resolving a study when its id is missing.
  *
- * MEASURED 2026-08-21 against TradingView Desktop:
+ * ================= A CORRECTION =================
  *
- *   getAllStudies() -> [ { name: 'TC-RTA V6',  id: [] },
- *                        { name: 'sweep probe', id: [] },
- *                        { name: 'Volume',      id: 'T4x6LH' } ]
+ * An earlier version of this file stated, as measured fact, that TradingView
+ * gives every Pine study its own distinct empty Array as an id. That was
+ * WRONG, and the mistake was generalising from a single broken pane without
+ * checking a working one. The control, run later the same day on two panes of
+ * the same layout:
  *
- * A built-in study gets a real string id. A Pine study gets an empty Array,
- * and every Pine study gets its OWN empty Array:
+ *     pane 1 (healthy)   TC-RTA V6  Pine  id "Uqd28X"
+ *                        TCPI       Pine  id "rExi1w"
+ *     pane 0 (broken)    TC-RTA V6  Pine  id []
  *
- *   all[0].id === all[1].id                       -> false
- *   getAllStudies()[0].id === all[0].id           -> true   (stable per study)
- *   getStudyById(all[0].id)                       -> the study, 67 inputs
- *   getStudyById([])                              -> throws "There is no such study"
+ * A healthy Pine study has an ordinary string id, exactly like a built-in.
+ * The empty Array is not how Pine is represented. It is DAMAGE: the id is
+ * assigned by the server when create_study completes, so a study whose
+ * registration never finished has none.
  *
- * So getStudyById resolves that id by REFERENCE IDENTITY. The id is not data,
- * it is a handle, and a handle cannot cross the CDP boundary: anything that
- * serializes it produces `[]`, which resolves to nothing.
+ * That matters because it changes what the right response is. A study with no
+ * id is not an addressing inconvenience to work around politely; it is a
+ * landmine that destroys its pane's chart session on the next reconnect. See
+ * core/session_health.js for the mechanism, the detection and the repair.
  *
- * chart_get_state was returning that `[]` to callers as `entity_id`, and four
- * tools take an entity_id string and call getStudyById with it. For a Pine
- * study every one of them was unreachable, on a product whose users keep their
- * work in Pine. The dataSource route is no better: for Pine, `src.id()` returns
- * the empty string, so state.js's dsById map never contained a single Pine
- * study and its metaInfo capture silently produced nothing.
+ * ================= WHY THIS RESOLVER STILL EXISTS =================
  *
- * The only place the reference still exists is the page. So resolve there:
- * find the live entry in getAllStudies() and hand ITS id straight back to
- * getStudyById without it ever being serialized.
+ * getStudyById resolves an id by REFERENCE IDENTITY, so even a damaged handle
+ * only works from inside the page: getStudyById([]) with a fresh literal
+ * throws "There is no such study", while getStudyById(all[0].id) with the live
+ * value works. So when a study HAS lost its id, the only way to reach it at
+ * all, including to remove it, is to find its live entry in getAllStudies()
+ * here in the page. That is what this resolver does, and it is what lets a
+ * damaged study be addressed by name long enough to get rid of it.
  */
 
 /**
  * In-page JS defining `__tvResolveStudy(chart, ref)`.
  *
- * Returns { study, error }. `ref` matches a string id first, then a study name.
+ * Returns { study, error }. `ref` matches a string id first, then a study name,
+ * which is the only handle left for a study whose id was never assigned.
  * An ambiguous name is refused rather than guessed: picking one of two studies
  * called the same thing is how the wrong indicator gets its inputs rewritten.
  *

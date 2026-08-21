@@ -10,9 +10,9 @@
 
 TVControl turns your TradingView Desktop into something you can talk to. You type a sentence (*"summarise this chart"*, *"sweep this strategy across SPY, QQQ and IWM on 5m and 15m"*, *"step through last March bar by bar and call out the breakout"*) and the AI reads, clicks, types, compiles and screenshots inside the actual TradingView app on your machine. No copy-paste and no TVControl-operated cloud backend. TradingView Desktop and explicitly selected public-API helpers still communicate with TradingView as documented.
 
-It works because every Chromium app, TradingView Desktop included, ships with a built-in debugging interface (the same one Chrome uses to debug itself). TVControl speaks that interface on your behalf, exposing **103 chart-control and diagnostic tools** to any AI agent that supports the Model Context Protocol (Claude Code, Codex, Gemini CLI, Cursor, and others). Pair-program in Pine Script. Optimize parameter grids. Snapshot and restore whole chart setups. Drive 4-pane layouts. Step through replay. Scan a watchlist. All by speech-to-action.
+It works because every Chromium app, TradingView Desktop included, ships with a built-in debugging interface (the same one Chrome uses to debug itself). TVControl speaks that interface on your behalf, exposing **106 chart-control and diagnostic tools** to any AI agent that supports the Model Context Protocol (Claude Code, Codex, Gemini CLI, Cursor, and others). Pair-program in Pine Script. Optimize parameter grids. Snapshot and restore whole chart setups. Drive 4-pane layouts. Step through replay. Scan a watchlist. All by speech-to-action.
 
-**103 MCP tools · 674 deterministic offline tests · 10 verify scripts · 8 prompt-library workflows · no TVControl cloud backend.** Everything in this repo is real, tested, and used daily.
+**106 MCP tools · 691 deterministic offline tests · 10 verify scripts · 8 prompt-library workflows · no TVControl cloud backend.** Everything in this repo is real, tested, and used daily.
 
 ## What is new in 2.3.0
 
@@ -22,6 +22,15 @@ Version 2.3.0 is about doing a thing once across everything you watch, instead o
 - **Quote a whole list at once.** `quote_batch` returns last, OHLC, change and volume for many symbols in a single server-side call. 29 symbols in 272ms. It names the symbols it could not find rather than quietly returning a shorter list.
 - **A destructive Pine bug is fixed.** `pine_new` replaced whatever was in the editor with a template and reported `new_script_created`. It did not create anything, and it is how a real script gets destroyed. It now refuses to overwrite a non-trivial buffer unless you pass `confirm_overwrite: true`, and it fails closed if it cannot read the buffer to check.
 - **Silent success is gone from the mutation tools.** A tool that changes something now builds its answer from an independent read, not from the response of the thing it just did. Deleting an alert id that never existed used to return `success: true, verified: true`. Adding a bare ticker to a watchlist used to store the literal string. `draw_clear` used to return a hardcoded `all_shapes_removed` without looking.
+- **A broken pane is now detectable and repairable.** A chart pane could get
+  stuck in a permanent reconnect loop, and rebuilding the layout by hand looked
+  like the only fix. It was a race in TVControl: TradingView returns Promises
+  from `createStudy` and friends, and reading the result after a fixed sleep
+  instead of awaiting them could leave a study with no server id, which
+  destroys that pane's data session on every reconnect from then on. The
+  promises are awaited now, an unregistered study is never left behind, and
+  `tv_chart_health` and `tv_repair_chart` find and fix a pane that is already
+  in that state without touching your layout.
 - **The offline suite is actually offline.** It was opening a live CDP connection and calling `removeAllShapes()` against the real chart on every run. It is hermetic now, and a guard makes the next escape a red test rather than a lost drawing.
 - **The server no longer misdescribes itself.** Version and tool counts are derived at startup and checked on the wire, after shipping a build that announced itself as 2.2.1 with 102 tools while registering 103.
 
@@ -73,7 +82,7 @@ The full prompt library (every workflow above plus chart analysis, watchlist and
 
 This isn't a demo. It ships with a test battery.
 
-- **674 offline tests**: Pine analyzer, sanitization, replay, pane and indicator boundaries, watchlist, alerts, state snapshots, sweep planning, vision wrapper, telemetry, capability gating, privacy-safe bundles, chaos cleanup, soak bounds, golden workflows, native watchdog services, update safety, tool registration, and CLI routing. Live Pine-service checks are isolated in `tests/pine_api.test.js`.
+- **691 offline tests**: Pine analyzer, sanitization, replay, pane and indicator boundaries, watchlist, alerts, state snapshots, sweep planning, vision wrapper, telemetry, capability gating, privacy-safe bundles, chaos cleanup, soak bounds, golden workflows, native watchdog services, update safety, tool registration, and CLI routing. Live Pine-service checks are isolated in `tests/pine_api.test.js`.
 - **10 end-to-end verify scripts** under [`examples/verify/`](./examples/verify/) that drive the same MCP tools through the `tv` CLI against a live TradingView. Run `examples/verify/run-all.sh` and it auto-skips when TV isn't up.
 - **GitHub Actions CI** runs lint, offline tests, dependency audit, and package checks on Node 18 and 22 across Linux, macOS, and Windows.
 - **CDP smoke** (`scripts/smoke.sh`): live connection sanity check against your local TradingView.

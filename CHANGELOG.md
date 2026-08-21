@@ -29,6 +29,52 @@ Minor, not a patch: two new tools and several changed return shapes.
 
 ### Fixed
 
+- **A chart pane would break permanently and the only apparent cure was
+  rebuilding the layout.** One pane sits in a reconnect loop while the rest of
+  the layout is fine. Diagnosed live by instrumenting the chart session:
+
+  ```
+  14ms   connect
+  14ms   _sendCreateSession   sid=cs_xm4Yn7i7Qkxa  state=1
+  108ms  _onCriticalError     "Invalid parameters"
+         method: create_study  args: [[], st4, sds_18, Script@tv-scripting-101!, ...]
+  ```
+
+  The pane replays its studies onto the new session and sends `create_study`
+  with an empty array where a string id belongs. The server rejects it as a
+  CRITICAL error, which destroys the session, and the next reconnect does it
+  again. It cannot self-heal: while in that state `symbolSameAsResolved()`
+  returns true although `symbolInfo()` is null, so re-setting the same symbol
+  is a silent no-op and every obvious manual remedy does nothing.
+
+  **The empty id was ours.** TradingView returns Promises from `createStudy`
+  (`Promise<EntityId>` since charting library 1.15), `setSymbol`,
+  `setResolution` and `createMultipointShape`. TVControl called them
+  fire-and-forget and read the result after a fixed sleep. Losing that race
+  leaves a study with no server id, which is why this struck at random. All of
+  them are now properly awaited, and `chart_manage_indicator` removes a study
+  that comes back without a usable id rather than leaving it on the chart.
+
+  `state_restore`'s `insertStudyWithoutCheck` path is gone. Measured, it took a
+  healthy pane from session `cs_VmBPx3nc31XM` state 2 to `""` state 0 in one
+  call, and never once produced a registered study. The inject paths now treat
+  registration, not the source count going up, as success, remove anything they
+  added without registering, and reconnect the session if one of them killed it.
+- **Added `tv_chart_health` and `tv_repair_chart`.** Health reports each pane's
+  data session and names any study that will kill it on reconnect. Repair
+  removes those studies and reconnects the pane, naming everything it removed
+  so it can be added back with `indicator_add_from_search`. TradingView's own
+  event sources (dividends, splits, earnings, roll dates) can never be removed
+  by it. `chart_get_state` now carries a `chart_health` block when the pane it
+  is describing is broken, so the problem is surfaced without being asked for.
+  Verified live: a deliberately poisoned pane detected, repaired, session back
+  as `cs_1HAJtX6Rannw`, and a healthy same-named study on the pane untouched.
+- **Correction.** An earlier 2.3.0 change claimed TradingView gives every Pine
+  study an empty-array id. That was wrong, generalised from one broken pane.
+  The control, on two panes of the same layout: healthy Pine studies had ids
+  `Uqd28X` and `rExi1w`, the broken pane's had `[]`. The empty array is damage,
+  not a Pine convention, and it is now reported as damage with a pointer to the
+  repair rather than as a quirk to work around.
 - **`pane_set_symbol` could write to the wrong pane and report success.**
   `pane_focus` clicked `_mainDiv` and then returned `focused: idx` straight
   from its own argument. Whether the click landed, whether the div existed,
