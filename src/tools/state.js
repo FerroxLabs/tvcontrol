@@ -11,7 +11,7 @@ export function registerStateTools(server) {
     catch (err) { return errorResult(err); }
   });
 
-  server.tool('state_restore', 'Restore a previously saved chart state snapshot by name', {
+  server.tool('state_restore', 'Restore a saved chart state snapshot by name. DESTRUCTIVE: this makes the chart MATCH the snapshot, which removes every study and every drawing that is not in it. Take a state_snapshot of the current chart first if you might want it back.', {
     name: z.string().describe('Snapshot name to restore'),
   }, async ({ name }) => {
     try { return jsonResult(await core.restore({ name })); }

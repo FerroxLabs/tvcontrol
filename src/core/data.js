@@ -570,6 +570,109 @@ export async function getEquity({ entity_id, _deps } = {}) {
   };
 }
 
+// BULK QUOTES WITHOUT TOUCHING THE CHART.
+//
+// getQuote used to physically hijack the chart to answer a question about a
+// symbol you were not looking at: setSymbol(target), wait, read, setSymbol(back),
+// wait. MEASURED on a live 2-pane chart with a heavy Pine study: 21 seconds for
+// ONE symbol, and it timed out on both the switch and the restore. A 74-symbol
+// sweep would be 25 minutes of the operator's chart flickering between tickers,
+// and any failure leaves the chart on the wrong instrument.
+//
+// TradingView's own screener endpoint answers the same question for a whole
+// list at once and touches nothing. MEASURED 2026-08-21 against the live
+// account: all 29 watchlist symbols in 272ms, including BINANCE and UNISWAP
+// pairs that the regional endpoints miss.
+//
+//   POST https://scanner.tradingview.com/global/scan
+//   { symbols: { tickers: [...], query: { types: [] } }, columns: [...] }
+//
+// It must be called SERVER-SIDE. From the page the browser blocks it on CORS,
+// which is why this uses fetch here rather than evaluateAsync. Same pattern as
+// symbolSearch in chart.js.
+const SCANNER_URL = 'https://scanner.tradingview.com/global/scan';
+const SCANNER_COLUMNS = ['name', 'close', 'change', 'change_abs', 'volume', 'open', 'high', 'low'];
+
+export async function getQuotes({ symbols, _deps } = {}) {
+  if (!Array.isArray(symbols) || symbols.length === 0) {
+    throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'symbols must be a non-empty array');
+  }
+  const wanted = [...new Set(symbols.map((x) => String(x == null ? '' : x).trim()).filter(Boolean))];
+  if (wanted.length === 0) {
+    throw new ClassifiedError(
+      CATEGORIES.INVALID_ARGUMENT,
+      'No usable symbols: every entry was empty or whitespace',
+      { hint: 'Pass exchange-prefixed symbols, e.g. ["NASDAQ:AAPL","BINANCE:BTCUSDT"].' },
+    );
+  }
+
+  const fetchImpl = _deps?.fetch || globalThis.fetch;
+  let resp;
+  try {
+    resp = await fetchImpl(SCANNER_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Origin: 'https://www.tradingview.com',
+        Referer: 'https://www.tradingview.com/',
+      },
+      body: JSON.stringify({ symbols: { tickers: wanted, query: { types: [] } }, columns: SCANNER_COLUMNS }),
+      signal: globalThis.AbortSignal.timeout(15_000),
+    });
+  } catch (err) {
+    throw new ClassifiedError(
+      CATEGORIES.API_UNEXPECTED,
+      `Quote lookup failed: ${err?.name === 'TimeoutError' ? 'timed out after 15000ms' : err.message}`,
+      { cause: err, hint: 'Check network access to scanner.tradingview.com and retry.' },
+    );
+  }
+  if (!resp.ok) {
+    throw new ClassifiedError(CATEGORIES.API_UNEXPECTED, `Quote endpoint returned ${resp.status}`);
+  }
+
+  let payload;
+  try {
+    payload = await resp.json();
+  } catch {
+    throw new ClassifiedError(CATEGORIES.API_UNEXPECTED, 'Quote endpoint returned a body that was not JSON');
+  }
+  if (!payload || !Array.isArray(payload.data)) {
+    throw new ClassifiedError(
+      CATEGORIES.API_UNEXPECTED,
+      'Quote endpoint returned 200 but not a result set',
+      { hint: 'Usually a transient upstream problem. Retry once.' },
+    );
+  }
+
+  const quotes = {};
+  for (const row of payload.data) {
+    const d = row.d || [];
+    quotes[row.s] = {
+      symbol: row.s,
+      ticker: d[0] ?? null,
+      last: d[1] ?? null,
+      change_percent: d[2] ?? null,
+      change: d[3] ?? null,
+      volume: d[4] ?? null,
+      open: d[5] ?? null,
+      high: d[6] ?? null,
+      low: d[7] ?? null,
+    };
+  }
+
+  // A symbol the screener does not know is NOT a symbol worth zero. Name it,
+  // rather than returning a short list and letting the caller assume coverage.
+  const not_found = wanted.filter((x) => !quotes[x]);
+  return {
+    success: not_found.length === 0,
+    requested: wanted.length,
+    count: Object.keys(quotes).length,
+    quotes: wanted.filter((x) => quotes[x]).map((x) => quotes[x]),
+    ...(not_found.length ? { not_found, error: `${not_found.length} of ${wanted.length} symbol(s) were not found by the quote endpoint` } : {}),
+    source: 'scanner_api',
+  };
+}
+
 export async function getQuote({ symbol, _deps } = {}) {
   const deps = _resolve(_deps);
   const run = _quoteLock.then(() => _getQuoteInternal({ symbol, deps }));

@@ -3,6 +3,8 @@
  */
 import { evaluate as _evaluate, evaluateAsync as _evaluateAsync, safeString, requireFinite } from '../connection.js';
 import { ClassifiedError, CATEGORIES } from '../errors.js';
+import { getQuotes } from './data.js';
+import { get as watchlistGet } from './watchlist.js';
 
 function _resolve(deps) {
   return {
@@ -169,6 +171,199 @@ export async function create({ condition = 'crossing', price, message, mobile_pu
     expiration_days: expiryDays,
     frequency: freq,
     resolution: res,
+  };
+}
+
+// ALERTS ACROSS A WHOLE WATCHLIST, WITHOUT TOUCHING THE CHART.
+//
+// create() reads the symbol off the active chart, which made a watchlist-wide
+// alert set look like it needed 74 chart switches. It does not: the create_alert
+// payload takes the symbol as a PARAMETER. VERIFIED on the live account
+// 2026-08-21 with the chart sitting on NYSE:SQM the whole time, creating alerts
+// for NASDAQ:AAPL, BINANCE:BTCUSDT and NASDAQ:TSLA, and reading each one back
+// off the server to confirm the stored symbol, resolution, frequency and
+// web_hook. The chart never moved.
+//
+// A fixed price is meaningless across a mixed watchlist (BTC at 90,000 and a
+// $12 miner cannot share a level), so percent_from_last computes a level per
+// symbol from a live quote. Quotes come from the screener endpoint in one
+// request, so a 29-symbol set prices in about 270ms.
+//
+// The message supports TradingView's own placeholders, which is what makes the
+// webhook worth pointing an app at: {{ticker}}, {{close}}, {{time}},
+// {{exchange}}, {{interval}}.
+export async function createBulk({
+  symbols,
+  condition = 'crossing',
+  price,
+  percent_from_last,
+  message,
+  webhook_url,
+  frequency = 'on_bar_close',
+  resolution = '60',
+  expiration_days = 30,
+  dry_run = false,
+  _deps,
+} = {}) {
+  const conditionType = CONDITION_TYPES[String(condition).trim().toLowerCase()];
+  if (!conditionType) {
+    throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, `Unsupported alert condition: ${condition}`);
+  }
+  const freq = String(frequency).trim().toLowerCase();
+  if (!FREQUENCIES.has(freq)) {
+    throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, `Unsupported alert frequency: ${frequency}`,
+      { hint: `One of: ${[...FREQUENCIES].join(', ')}.` });
+  }
+  const res = String(resolution).trim().toUpperCase();
+  if (!RESOLUTION_RE.test(res)) {
+    throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, `Unsupported alert resolution: ${resolution}`,
+      { hint: 'Minutes as a bare number (1, 5, 15, 60, 240) or D, W, M.' });
+  }
+  const expiryDays = Number(expiration_days);
+  if (!Number.isInteger(expiryDays) || expiryDays < 1 || expiryDays > 365) {
+    throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'expiration_days must be an integer from 1 to 365');
+  }
+  const hasPrice = price !== undefined && price !== null;
+  const hasPct = percent_from_last !== undefined && percent_from_last !== null;
+  if (hasPrice === hasPct) {
+    throw new ClassifiedError(
+      CATEGORIES.INVALID_ARGUMENT,
+      'Give exactly one of price or percent_from_last',
+      { hint: 'price sets the same level on every symbol. percent_from_last sets a level per symbol from its live quote, which is what you want across a mixed watchlist.' },
+    );
+  }
+  const pct = hasPct ? requireFinite(percent_from_last, 'percent_from_last') : null;
+  const flat = hasPrice ? requireFinite(price, 'price') : null;
+  if (webhook_url !== undefined && webhook_url !== null) {
+    const u = String(webhook_url).trim();
+    if (!/^https?:\/\//i.test(u)) {
+      throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, `webhook_url must be an http(s) URL, got: ${u}`);
+    }
+  }
+
+  // Default to the whole active watchlist, which is the case this exists for.
+  let wanted;
+  if (Array.isArray(symbols) && symbols.length) {
+    wanted = [...new Set(symbols.map((x) => String(x == null ? '' : x).trim()).filter(Boolean))];
+  } else {
+    const wl = await watchlistGet({ _deps });
+    wanted = (wl.entries || []).map(String).filter((x) => x && !x.startsWith('###'));
+  }
+  if (!wanted.length) {
+    throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'No symbols to alert on');
+  }
+
+  // Price each symbol from ONE bulk quote request rather than 74 chart switches.
+  const levels = {};
+  let priced = null;
+  if (hasPct) {
+    priced = await getQuotes({ symbols: wanted, _deps });
+    for (const q of priced.quotes) {
+      if (typeof q.last === 'number') levels[q.symbol] = +(q.last * (1 + pct / 100)).toFixed(8);
+    }
+  } else {
+    for (const sym of wanted) levels[sym] = flat;
+  }
+  const unpriced = wanted.filter((x) => levels[x] === undefined);
+
+  if (dry_run) {
+    return {
+      success: unpriced.length === 0,
+      dry_run: true,
+      condition: conditionType,
+      frequency: freq,
+      resolution: res,
+      webhook: webhook_url || null,
+      would_create: wanted.filter((x) => levels[x] !== undefined).map((x) => ({ symbol: x, price: levels[x] })),
+      ...(unpriced.length ? { skipped: unpriced, error: `${unpriced.length} symbol(s) had no quote, so no level could be computed` } : {}),
+    };
+  }
+
+  const { evaluateAsync } = _resolve(_deps);
+  const before = await _presentIds({ _deps });
+  if (before === null) {
+    throw new ClassifiedError(
+      CATEGORIES.API_UNEXPECTED,
+      'Could not read the alert list first, so the results could not be verified and nothing was created',
+      { hint: 'Usually an expired session. Reload TradingView, confirm you are logged in, and retry.' },
+    );
+  }
+
+  const attempted = [];
+  for (const sym of wanted) {
+    if (levels[sym] === undefined) continue;
+    const text = message || `${sym} ${conditionType} ${levels[sym]}`;
+    const created = await evaluateAsync(`
+      (async function() {
+        try {
+          var payload = {
+            conditions: [{
+              type: ${safeString(conditionType)},
+              frequency: ${safeString(freq)},
+              series: [{ type: 'barset' }, { type: 'value', value: ${JSON.stringify(levels[sym])} }],
+              resolution: ${safeString(res)}
+            }],
+            symbol: '={"symbol":"' + ${safeString(sym)} + '"}',
+            resolution: ${safeString(res)},
+            message: ${safeString(text)},
+            sound_file: 'alert/fired', sound_duration: 0,
+            popup: true, auto_deactivate: true,
+            email: false, sms_over_email: false, mobile_push: false,
+            web_hook: ${webhook_url ? safeString(String(webhook_url).trim()) : 'null'},
+            name: null,
+            expiration: new Date(Date.now() + ${expiryDays} * 86400000).toISOString(),
+            active: true, ignore_warnings: true
+          };
+          var response = await fetch('https://pricealerts.tradingview.com/create_alert', {
+            method: 'POST', credentials: 'include',
+            headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
+            body: JSON.stringify({ payload: payload })
+          });
+          var t = await response.text();
+          var data = {}; try { data = JSON.parse(t); } catch (e) {}
+          if (response.ok && data.s === 'ok') return { ok: true, alert_id: data.r && data.r.alert_id };
+          return { ok: false, error: (data.err && data.err.code) || data.errmsg || t.slice(0, 160) };
+        } catch (e) { return { ok: false, error: e.message }; }
+      })()
+    `);
+    attempted.push({ symbol: sym, price: levels[sym], alert_id: created?.alert_id ?? null, api_ok: !!created?.ok, error: created?.ok ? undefined : (created?.error || 'unknown error') });
+  }
+
+  // ONE verification read for the whole batch. The per-call "ok" is the action
+  // reporting on itself; only a fresh list proves an alert exists.
+  const after = await _presentIds({ _deps });
+  if (after === null) {
+    throw new ClassifiedError(
+      CATEGORIES.API_UNEXPECTED,
+      `${attempted.length} create call(s) were accepted but the alert list could not be re-read, so none of them are confirmed`,
+      { hint: 'Call alert_list to see the true current state before retrying: retrying blind would duplicate whatever did land.' },
+    );
+  }
+
+  const results = attempted.map((a) => ({
+    ...a,
+    created: a.alert_id != null && after.has(String(a.alert_id)),
+  }));
+  const created = results.filter((r) => r.created);
+  const failed = results.filter((r) => !r.created);
+
+  return {
+    success: failed.length === 0 && unpriced.length === 0,
+    requested: wanted.length,
+    created_count: created.length,
+    failed_count: failed.length,
+    condition: conditionType,
+    frequency: freq,
+    resolution: res,
+    webhook: webhook_url || null,
+    alert_ids: created.map((r) => r.alert_id),
+    results,
+    ...(unpriced.length ? { skipped_no_quote: unpriced } : {}),
+    ...(failed.length || unpriced.length
+      ? { error: `${failed.length} of ${attempted.length} alert(s) could not be confirmed${unpriced.length ? `; ${unpriced.length} symbol(s) had no quote` : ''}` }
+      : {}),
+    verified_from: 'list_alerts',
+    source: 'pricealerts_api',
   };
 }
 

@@ -19,7 +19,7 @@ export function registerDrawingTools(server) {
     catch (err) { return errorResult(err); }
   });
 
-  server.tool('draw_clear', 'Remove all drawings from the chart', {}, async () => {
+  server.tool('draw_clear', 'Remove ALL drawings from the chart. DESTRUCTIVE and there is no undo through this API: every trendline, level and annotation on the active chart is deleted, not just ones you added. Use draw_remove_one with an entity_id to remove a single drawing.', {}, async () => {
     try { return jsonResult(await core.clearAll()); }
     catch (err) { return errorResult(err); }
   });

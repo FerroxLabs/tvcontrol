@@ -33,10 +33,11 @@ export function registerUiTools(server) {
     catch (err) { return errorResult(err); }
   });
 
-  server.tool('layout_switch', 'Switch to a saved chart layout by name or ID', {
+  server.tool('layout_switch', 'Switch to a saved chart layout by name or ID. Stops rather than discarding unsaved changes on the current chart unless discard_unsaved is set.', {
     name: z.string().describe('Name or ID of the layout to switch to'),
-  }, async ({ name }) => {
-    try { return jsonResult(await core.layoutSwitch({ name })); }
+    discard_unsaved: z.coerce.boolean().optional().default(false).describe('Throw away unsaved changes on the current chart. Without this, a chart with unsaved work stops the switch instead of losing it.'),
+  }, async ({ name, discard_unsaved }) => {
+    try { return jsonResult(await core.layoutSwitch({ name, discard_unsaved })); }
     catch (err) { return errorResult(err); }
   });
 

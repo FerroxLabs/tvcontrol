@@ -290,7 +290,7 @@ export async function layoutList({ limit = 50, offset = 0, include_details = fal
   };
 }
 
-export async function layoutSwitch({ name }) {
+export async function layoutSwitch({ name, discard_unsaved = false }) {
   const escaped = JSON.stringify(name);
   const result = await evaluateAsync(`
     new Promise(function(resolve) {
@@ -313,24 +313,61 @@ export async function layoutSwitch({ name }) {
   `);
   if (!result?.success) throw new ClassifiedError(CATEGORIES.TV_UI_CHANGED, result?.error || 'Unknown error switching layout');
 
-  // Handle "unsaved changes" confirmation dialog
+  // THE UNSAVED-CHANGES DIALOG IS A DECISION, NOT A NUISANCE.
+  //
+  // This used to hunt every button on the page for /open anyway|don't save|
+  // discard/i and click it, then report unsaved_dialog_dismissed:true after the
+  // fact. Reporting it afterwards is better than silence, but throwing away
+  // somebody's unsaved chart work is not a default a tool gets to pick. The
+  // caller has to ask for it.
   await new Promise(r => setTimeout(r, 500));
-  const dismissed = await evaluate(`
+  const dialog = await evaluate(`
     (function() {
       var btns = document.querySelectorAll('button');
+      var discard = null, cancel = null;
       for (var i = 0; i < btns.length; i++) {
-        var text = btns[i].textContent.trim();
-        if (/open anyway|don't save|discard/i.test(text)) {
-          btns[i].click();
-          return true;
-        }
+        var text = (btns[i].textContent || '').trim();
+        if (!discard && /open anyway|don't save|discard/i.test(text)) discard = text;
+        if (!cancel && /^(cancel|back)$/i.test(text)) cancel = text;
       }
-      return false;
+      return { present: !!discard, discard_label: discard, cancel_label: cancel };
     })()
   `);
 
-  if (dismissed) await new Promise(r => setTimeout(r, 1000));
-  return { success: true, layout: result.name || name, layout_id: result.id, source: result.source, action: 'switched', unsaved_dialog_dismissed: dismissed };
+  let dismissed = false;
+  if (dialog?.present) {
+    if (!discard_unsaved) {
+      // Back out of the dialog so the UI is not left blocked, then say plainly
+      // what stopped the switch.
+      await evaluate(`
+        (function() {
+          var btns = document.querySelectorAll('button');
+          for (var i = 0; i < btns.length; i++) {
+            if (/^(cancel|back)$/i.test((btns[i].textContent || '').trim())) { btns[i].click(); return true; }
+          }
+          return false;
+        })()
+      `);
+      throw new ClassifiedError(
+        CATEGORIES.INVALID_ARGUMENT,
+        `The current chart has unsaved changes, so the switch to "${result.name || name}" was stopped rather than discarding them`,
+        { hint: 'Save the layout first, or pass discard_unsaved:true to throw the changes away deliberately.' },
+      );
+    }
+    await evaluate(`
+      (function() {
+        var btns = document.querySelectorAll('button');
+        for (var i = 0; i < btns.length; i++) {
+          if (/open anyway|don't save|discard/i.test((btns[i].textContent || '').trim())) { btns[i].click(); return true; }
+        }
+        return false;
+      })()
+    `);
+    dismissed = true;
+    await new Promise(r => setTimeout(r, 1000));
+  }
+
+  return { success: true, layout: result.name || name, layout_id: result.id, source: result.source, action: 'switched', unsaved_changes_discarded: dismissed };
 }
 
 export async function keyboard({ key, modifiers }) {

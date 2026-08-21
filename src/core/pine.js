@@ -508,9 +508,68 @@ export async function getSource() {
   return { success: true, source, line_count: source.split('\n').length, char_count: source.length };
 }
 
-export async function setSource({ source }) {
+
+/**
+ * REFUSE TO SILENTLY CLOBBER SOMEBODY'S SCRIPT.
+ *
+ * Both setSource and newScript reach into the open Monaco buffer and call
+ * setValue(). Monaco does not care what was there. If the editor happens to
+ * have one of the operator's 276 saved scripts open, that script's buffer is
+ * replaced, and the very next pine_save OR pine_compile (which clicks
+ * "Save and add to chart" BEFORE it compiles) persists the replacement to the
+ * cloud. That chain is how a real strategy was destroyed once already.
+ *
+ * newScript was the worst of the two: it is described as "Create a new blank
+ * Pine Script", it creates nothing, and it returned
+ * { success: true, action: 'new_script_created' } after overwriting whatever
+ * was open. An agent told to "make me a new script" would wipe a 500-line
+ * strategy and be told it had succeeded.
+ *
+ * So: read the buffer FIRST. If there is real content there, stop and say what
+ * is about to be lost. Overwriting is still possible, but only when the caller
+ * asks for it in as many words.
+ */
+async function _assertBufferSafeToReplace(confirm_overwrite, what) {
+  if (confirm_overwrite === true) return { skipped: true };
+  const buf = await evaluate(`
+    (function() {
+      var m = ${FIND_MONACO};
+      if (!m) return { ok: false };
+      var v = '';
+      try { v = m.editor.getValue() || ''; } catch (e) { return { ok: false }; }
+      var lines = v.split('\n');
+      var meaningful = lines.filter(function(l) {
+        var t = l.trim();
+        return t && t.indexOf('//') !== 0;
+      }).length;
+      return { ok: true, lines: lines.length, chars: v.length, meaningful: meaningful, head: v.slice(0, 160) };
+    })()
+  `);
+  // Cannot read the buffer: assume the worst rather than the best.
+  if (!buf || !buf.ok) {
+    throw new ClassifiedError(
+      CATEGORIES.API_UNEXPECTED,
+      `Could not read the Pine editor buffer, so ${what} was refused rather than risk overwriting an open script`,
+      { hint: 'Open the Pine Editor and retry, or pass confirm_overwrite:true if you are certain the buffer is expendable.' },
+    );
+  }
+  // A blank editor, or nothing but the boilerplate template, is fair game.
+  if (buf.meaningful <= 3 && buf.chars < 200) return { skipped: false, buffer: buf };
+
+  throw new ClassifiedError(
+    CATEGORIES.INVALID_ARGUMENT,
+    `The Pine editor currently holds ${buf.lines} lines (${buf.chars} chars). ${what} would overwrite it, and a following pine_save or pine_compile would persist that loss to your saved script.`,
+    {
+      hint: 'Read it first with pine_get_source and save a copy. Pass confirm_overwrite:true only when you are certain the open buffer is expendable.',
+      details: { lines: buf.lines, chars: buf.chars, first_160_chars: buf.head },
+    },
+  );
+}
+
+export async function setSource({ source, confirm_overwrite } = {}) {
   const editorReady = await ensurePineEditorOpen();
   if (!editorReady) throw new ClassifiedError(CATEGORIES.PINE_EDITOR_CLOSED, 'Could not open Pine Editor.');
+  await _assertBufferSafeToReplace(confirm_overwrite, 'pine_set_source');
 
   const escaped = JSON.stringify(source);
   // READ BACK WHAT WE WROTE. setValue() returning without throwing proves
@@ -797,9 +856,10 @@ export async function smartCompile() {
   };
 }
 
-export async function newScript({ type }) {
+export async function newScript({ type, confirm_overwrite } = {}) {
   const editorReady = await ensurePineEditorOpen();
   if (!editorReady) throw new ClassifiedError(CATEGORIES.PINE_EDITOR_CLOSED, 'Could not open Pine Editor.');
+  await _assertBufferSafeToReplace(confirm_overwrite, 'pine_new');
 
   const typeMap = { indicator: 'indicator', strategy: 'strategy', library: 'library' };
   const templates = {
@@ -823,7 +883,16 @@ export async function newScript({ type }) {
 
   if (!set) throw new ClassifiedError(CATEGORIES.PINE_EDITOR_CLOSED, 'Monaco editor not found. Ensure Pine Editor is open.');
 
-  return { success: true, type, action: 'new_script_created', template: typeMap[type] };
+  // NOT 'new_script_created'. Nothing was created. A template was written into
+  // the editor buffer that was already open, and saying otherwise is what made
+  // this tool dangerous to hand to an agent.
+  return {
+    success: true,
+    type,
+    action: 'editor_buffer_replaced_with_template',
+    template: typeMap[type],
+    note: 'This replaced the Pine editor buffer with a template. It did NOT create a new saved script. Use pine_save to persist it, which will write to whichever script the editor is bound to.',
+  };
 }
 
 export async function openScript({ name }) {

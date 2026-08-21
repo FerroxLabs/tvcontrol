@@ -8,14 +8,15 @@ export function registerPineTools(server) {
     catch (err) { return errorResult(err); }
   });
 
-  server.tool('pine_set_source', 'Set Pine Script source code in the editor', {
+  server.tool('pine_set_source', 'Set Pine Script source code in the editor. Refuses to overwrite a buffer holding real content unless confirm_overwrite is set.', {
     source: z.string().describe('Pine Script source code to inject'),
-  }, async ({ source }) => {
-    try { return jsonResult(await core.setSource({ source })); }
+    confirm_overwrite: z.coerce.boolean().optional().default(false).describe('Required when the editor already holds real content. Read it with pine_get_source first.'),
+  }, async ({ source, confirm_overwrite }) => {
+    try { return jsonResult(await core.setSource({ source, confirm_overwrite })); }
     catch (err) { return errorResult(err); }
   });
 
-  server.tool('pine_compile', 'Compile / add the current Pine Script to the chart', {}, async () => {
+  server.tool('pine_compile', 'Compile the current Pine Script and add it to the chart. WARNING: this SAVES first, clicking Save and add to chart, which persists the current editor buffer to the saved script it is bound to.', {}, async () => {
     try { return jsonResult(await core.compile()); }
     catch (err) { return errorResult(err); }
   });
@@ -35,15 +36,16 @@ export function registerPineTools(server) {
     catch (err) { return errorResult(err); }
   });
 
-  server.tool('pine_smart_compile', 'Intelligent compile: detects button, compiles, checks errors, reports study changes', {}, async () => {
+  server.tool('pine_smart_compile', 'Intelligent compile: detects button, compiles, checks errors, reports study changes WARNING: like pine_compile this SAVES the current buffer to the bound saved script before compiling.', {}, async () => {
     try { return jsonResult(await core.smartCompile()); }
     catch (err) { return errorResult(err); }
   });
 
-  server.tool('pine_new', 'Create a new blank Pine Script', {
-    type: z.enum(['indicator', 'strategy', 'library']).describe('Type of script to create'),
-  }, async ({ type }) => {
-    try { return jsonResult(await core.newScript({ type })); }
+  server.tool('pine_new', 'Replace the Pine editor buffer with a blank template. WARNING: this does NOT create a new saved script. It overwrites whatever script the editor currently has open, and a following pine_save or pine_compile persists that overwrite to the cloud. It refuses to run when the buffer holds real content unless confirm_overwrite is set.', {
+    type: z.enum(['indicator', 'strategy', 'library']).describe('Template to write into the editor'),
+    confirm_overwrite: z.coerce.boolean().optional().default(false).describe('Required when the editor already holds real content. Read it with pine_get_source first.'),
+  }, async ({ type, confirm_overwrite }) => {
+    try { return jsonResult(await core.newScript({ type, confirm_overwrite })); }
     catch (err) { return errorResult(err); }
   });
 

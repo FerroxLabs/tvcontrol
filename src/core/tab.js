@@ -231,13 +231,23 @@ export async function closeTab() {
   const after = await _withShell(async (evaluateShell) => {
     const clicked = await evaluateShell(`
       (function() {
-        var active = document.querySelector('.tabs-container .tab.active') || document.querySelectorAll('.tabs-container .tab')[0];
-        if (!active) return false;
+        // NO FALLBACK TO tab[0]. If nothing is marked active we do not know
+        // which tab the operator is looking at, and closing an arbitrary one is
+        // not a recoverable mistake. Fail instead of guessing.
+        var active = document.querySelector('.tabs-container .tab.active');
+        if (!active) return 'no-active-tab';
         var close = active.querySelector('[class*="close"] button') || active.querySelector('button[class*="close"]') || active.querySelector('[class*="close"]');
         if (!close) return false;
         close.click(); return true;
       })()
     `);
+    if (clicked === 'no-active-tab') {
+      throw new ClassifiedError(
+        CATEGORIES.TV_UI_CHANGED,
+        'No tab is marked active, so tab_close could not tell which tab you are on and refused to guess',
+        { hint: 'Click the tab you want to close, or use tab_switch first.' },
+      );
+    }
     if (!clicked) throw new ClassifiedError(CATEGORIES.TV_UI_CHANGED, 'Close button not found on the active tab');
     await wait(1000);
     return evaluateShell(`document.querySelectorAll('.tabs-container .tab').length`);

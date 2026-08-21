@@ -57,6 +57,13 @@ export function registerDataTools(server) {
     }
   });
 
+  server.tool('quote_batch', 'Get live quotes for MANY symbols in ONE request without touching the chart. Use this for watchlist and universe sweeps: 29 symbols return in about 270ms. quote_get switches the chart symbol and takes ~20s each, so never loop it.', {
+    symbols: z.array(z.string()).min(1).max(500).describe('Exchange-prefixed symbols, e.g. ["NASDAQ:AAPL","BINANCE:BTCUSDT"]. Duplicates are collapsed. Symbols the endpoint does not know are reported in not_found rather than silently dropped.'),
+  }, async ({ symbols }) => {
+    try { return jsonResult(await core.getQuotes({ symbols })); }
+    catch (err) { return errorResult(err); }
+  });
+
   server.tool('data_get_pine_lines', 'Read horizontal price levels drawn by Pine Script indicators (line.new). Returns deduplicated price levels per study. Use study_filter to target a specific indicator.', {
     study_filter: z.string().optional().describe('Substring to match study name (e.g., "Profiler", "NY Levels"). Omit for all.'),
     verbose: z.coerce.boolean().optional().describe('Return raw line data with IDs, coordinates, colors (default false — returns only unique price levels)'),
