@@ -1,7 +1,7 @@
 {
   "name": "@ferroxlabs/tvcontrol",
-  "version": "2.3.0",
-  "description": "AI remote control for TradingView Desktop — 102 MCP tools driving symbols, indicators, Pine Script, snapshots, sweeps, diagnostics, and live chart vision over CDP.",
+  "version": "2.3.1",
+  "description": "AI remote control for TradingView Desktop — 105 MCP tools driving symbols, indicators, Pine Script, snapshots, sweeps, diagnostics, and live chart vision over CDP.",
   "type": "module",
   "license": "MIT",
   "author": "Ferrox Labs",
@@ -27,7 +27,7 @@
   "main": "src/server.js",
   "bin": {
     "tv": "src/cli/index.js",
-    "tvcontrol": "src/cli/index.js"
+    "tvcontrol": "src/server.js"
   },
   "exports": {
     ".": "./src/server.js",
@@ -47,6 +47,7 @@
     "docs/releases/"
   ],
   "scripts": {
+    "prepublishOnly": "node scripts/check_bin_entrypoint.js",
     "start": "node src/server.js",
     "tv": "node src/cli/index.js",
     "lint": "eslint src/ tests/",
@@ -57,7 +58,8 @@
     "test:cli": "node --test tests/cli.test.js",
     "test:all": "node --test tests/e2e.test.js tests/pine_analyze.test.js tests/cli.test.js",
     "test:verbose": "node --test --test-reporter=spec tests/sanitization.test.js tests/replay.test.js tests/pine_analyze.test.js",
-    "test:count": "node --test --test-reporter=spec tests/e2e.test.js 2>&1 | tail -5"
+    "test:count": "node --test --test-reporter=spec tests/e2e.test.js 2>&1 | tail -5",
+    "test:bin": "node --test tests/bin_entrypoint.test.js"
   },
   "engines": {
     "node": ">=18.14.1"
