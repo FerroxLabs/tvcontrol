@@ -298,7 +298,7 @@ export async function get({ _deps } = {}) {
 
   // Prices only exist in the rendered widget, and the widget is not guaranteed
   // to be showing the list the API calls "active". MEASURED on a live account
-  // 2026-08-20: the API returned RebelUOS (29 crypto symbols) while the panel
+  // 2026-08-20: the API returned one list (29 crypto symbols) while the panel
   // rendered a different list entirely (59 equities). Zero overlap.
   //
   // So enrichment is keyed by symbol and MATCHED, never assumed. The previous
