@@ -2,6 +2,51 @@
 
 All notable changes to TVControl are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [2.4.1] - 2026-08-28
+
+### Added
+
+- **`TV_MCP_READONLY=1`** — a read-only mode that registers only the 58 tools of the
+  110-tool catalog that cannot mutate the user's TradingView state. It exists because an
+  MCP grant is server-level, not per-tool: an unattended run that is allowed to talk to
+  TVControl at all is allowed to call `watchlist_remove_bulk`, `alert_delete`, `draw_clear`,
+  `pine_save` and `tv_launch` against a real trading account with nobody watching. Under the
+  flag those tools are NOT REGISTERED — absent from `tools/list`, refused by the MCP layer as
+  unknown — so the safety property is structural rather than a rule the model is asked to
+  follow. The gate is one choke point in `src/server.js`, and the allowlist is an
+  enumeration, so a tool added later is denied until it is classified on purpose.
+
+  Chart NAVIGATION stays available (symbol, timeframe, visible range, pane focus, pane
+  symbol, tab and layout switching). It moves the view of anyone watching the chart, but it
+  destroys nothing and a universe scan cannot work without it — reading a Pine table across
+  74 symbols means setting the symbol 74 times. Anything that PERSISTS or DESTROYS is denied,
+  including `state_restore` (it makes the chart match the snapshot, dropping studies and
+  drawings), `strategy_sweep` (it rewrites indicator inputs), raw UI actuation, and every
+  process-level action. `ui_evaluate` stays unregistered even when `TV_MCP_ADVANCED=1` is
+  also set: read-only wins.
+
+  `batch_run` IS registered. Its action enum contains read actions only — `screenshot`,
+  `get_ohlcv`, `get_strategy_results`, `get_study_values`, `get_pine_tables` — and it restores
+  the starting symbol and timeframe in a `finally` block. `tests/readonly.test.js` pins that
+  enum as the server publishes it, so adding a mutating action there fails the suite instead
+  of silently reopening everything this gate closes.
+
+- **`tests/readonly.test.js`** boots the real server as a subprocess and asserts on
+  `tools/list`, not on a mock's bookkeeping. It checks the exact registered set with the flag,
+  the set without it (so the pass cannot be vacuous), the flag beating `TV_MCP_ADVANCED`, a
+  `tools/call` of a blocked tool returning an unknown-tool error, and a `tools/call` of an
+  allowed tool actually reaching the connection layer. Every guard was mutation-proven: the
+  fix was removed, the test was confirmed to fail, and the fix restored.
+
+### Changed
+
+- `tv_capability_matrix` now reports `readonly_mode` and derives each tool's `registered`
+  flag from the same predicate the server registers by, so the matrix cannot claim a tool is
+  available in a session where the server never registered it. The server's headline tool
+  count and description are likewise derived from what it actually registered.
+
+---
+
 ## [2.3.0] - 2026-08-21
 
 Minor, not a patch: two new tools and several changed return shapes.

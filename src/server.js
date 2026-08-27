@@ -6,6 +6,7 @@ import { flushNow as flushTelemetry } from './core/telemetry.js';
 import { errorResult, instrument } from './tools/_format.js';
 import { coordinateMcpHandler } from './core/coordination.js';
 import { gateToolHandler } from './core/capabilities.js';
+import { isReadonlyMode, isToolRegistered } from './core/readonly.js';
 import { registerHealthTools } from './tools/health.js';
 import { registerChartTools } from './tools/chart.js';
 import { registerPineTools } from './tools/pine.js';
@@ -45,14 +46,22 @@ const GATED = CATALOG.filter((name) => name === 'ui_evaluate');
 const TOOL_COUNT = CATALOG.length;
 const DEFAULT_COUNT = TOOL_COUNT - GATED.length;
 
+// What this process will ACTUALLY register. Equals DEFAULT_COUNT in normal operation and
+// drops to the read-only allowlist under TV_MCP_READONLY=1. The headline count and the
+// description are derived from this rather than from DEFAULT_COUNT, because a read-only
+// server that introduces itself with the full count is lying in the same way the 2.2.1
+// hardcoded count was.
+const READONLY = isReadonlyMode();
+const REGISTERED_COUNT = CATALOG.filter((name) => isToolRegistered(name)).length;
+
 const server = new McpServer(
   {
     name: 'tvcontrol',
     version: _pkg.version,
-    description: `AI remote control for TradingView Desktop — ${DEFAULT_COUNT} MCP tools driving symbols, indicators, Pine Script, snapshots, sweeps, diagnostics, and live chart vision over CDP.`,
+    description: `AI remote control for TradingView Desktop — ${REGISTERED_COUNT} MCP tools driving symbols, indicators, Pine Script, snapshots, sweeps, diagnostics, and live chart vision over CDP.`,
   },
   {
-    instructions: `tvcontrol — ${DEFAULT_COUNT} tools for reading, diagnosing, and controlling a live TradingView Desktop chart over Chrome DevTools Protocol.
+    instructions: `tvcontrol — ${REGISTERED_COUNT} tools for reading, diagnosing, and controlling a live TradingView Desktop chart over Chrome DevTools Protocol.
 
 TOOL SELECTION GUIDE — use this to pick the right tool:
 
@@ -90,7 +99,9 @@ Launch: tv_launch → auto-detect and start TradingView with CDP on any platform
 Panes: pane_list, pane_set_layout (s, 2h, 2v, 4, 6, 8), pane_focus, pane_set_symbol
 Tabs: tab_list, tab_new, tab_close, tab_switch
 
-Advanced (opt-in): ui_evaluate (run arbitrary page JS) is GATED behind the TV_MCP_ADVANCED=1 env var and is NOT registered by default. Of the ${TOOL_COUNT}-tool catalog, ${DEFAULT_COUNT} are available unless that flag is set.
+Advanced (opt-in): ui_evaluate (run arbitrary page JS) is GATED behind the TV_MCP_ADVANCED=1 env var and is NOT registered by default. Of the ${TOOL_COUNT}-tool catalog, ${DEFAULT_COUNT} are available unless that flag is set.${READONLY ? `
+
+READ-ONLY MODE IS ACTIVE (TV_MCP_READONLY=1). Only the ${REGISTERED_COUNT} tools that cannot mutate this TradingView account are registered in this session. Every mutating tool — watchlist edits, alert create/delete, drawing writes, indicator changes, Pine saves, replay, state_restore, tv_launch — is ABSENT from this list, not merely discouraged, and calling one returns an unknown-tool error. Chart navigation (symbol, timeframe, visible range, pane/tab/layout switching) IS available: it moves the view of anyone watching the chart, so restore what you changed when you are done.` : ''}
 
 CONTEXT MANAGEMENT:
 - ALWAYS use summary=true on data_get_ohlcv
@@ -108,6 +119,11 @@ CONTEXT MANAGEMENT:
 // previously crash startup with `handler is undefined`.
 const _origTool = server.tool.bind(server);
 server.tool = (name, ...rest) => {
+  // THE READ-ONLY GATE. One choke point, applied before anything else, so a tool added to any
+  // tool file in future is denied under TV_MCP_READONLY=1 until it is named in the allowlist.
+  // Skipping registration (rather than refusing at call time) is the point: the tool never
+  // appears in tools/list, so there is nothing for an unattended agent to try.
+  if (!isToolRegistered(name)) return undefined;
   const handler = rest[rest.length - 1];
   const gated = gateToolHandler(name, coordinateMcpHandler(name, handler));
   rest[rest.length - 1] = instrument(name, async (...args) => {

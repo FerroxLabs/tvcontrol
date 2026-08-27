@@ -276,6 +276,7 @@ The full per-tool decision tree (*which tool to call for which question*) lives 
 - TVControl's chart-control path speaks CDP to the Electron app already running on your machine. TradingView Desktop and explicitly documented public helpers still communicate with TradingView.
 - TVControl does not operate a cloud backend. Local snapshots, telemetry, reliability receipts, and support bundles are written only when their corresponding features are used.
 - No real trades are executed. Chart, drawings, indicators, and Pine code only.
+- **`TV_MCP_READONLY=1` registers only the tools that cannot change your TradingView state.** For unattended use — a scheduled morning brief, a cron job, a CI agent — where nobody is there to approve a call. An MCP grant is server-level, so a host that can reach TVControl can reach every tool it registers; under this flag the mutating ones are never registered, so calling one is an unknown-tool error rather than a promise the model is asked to keep. Reads, diagnostics, screenshots and chart navigation (symbol, timeframe, range, pane/tab/layout switching) stay available; watchlist edits, alert create/delete, drawing writes, indicator changes, Pine saves, replay, `state_restore` and `tv_launch` do not. `ui_evaluate` stays off even if `TV_MCP_ADVANCED=1` is also set.
 
 The same CDP interface is built into every Chromium app: VS Code, Slack, Discord, Chrome itself. It's not a side door; it's the standard debugging interface Google ships with the runtime.
 

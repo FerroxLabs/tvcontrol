@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { compatibilityCheck } from './health.js';
 import { ClassifiedError, CATEGORIES } from '../errors.js';
+import { isReadonlyMode, isToolRegistered } from './readonly.js';
 
 const TOOLS_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'tools');
 const CACHE_MS = 10_000;
@@ -99,7 +100,9 @@ export async function getCapabilityMatrix({ probe = true, force = false, _deps }
   const tools = deps.catalog().map((name) => {
     const requires = requiredCapabilitiesForTool(name);
     const missing = checks ? requires.filter((capability) => checks[capability] !== true) : [];
-    const registered = name !== 'ui_evaluate' || process.env.TV_MCP_ADVANCED === '1';
+    // Same predicate the server registers by, so the matrix cannot claim a tool is
+    // available in a session where the server never registered it.
+    const registered = isToolRegistered(name);
     return {
       tool: name,
       requires,
@@ -111,6 +114,7 @@ export async function getCapabilityMatrix({ probe = true, force = false, _deps }
   });
   return {
     success: true,
+    readonly_mode: isReadonlyMode(),
     probe_status: checks ? 'available' : (probe ? 'unavailable' : 'not_requested'),
     ...(probeError ? { probe_error_category: probeError } : {}),
     desktop_version: live?.desktop_version || null,
