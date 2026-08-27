@@ -33,6 +33,11 @@ export function registerUiTools(server) {
     catch (err) { return errorResult(err); }
   });
 
+  server.tool('layout_get_active', 'Which saved layout the attached chart is currently showing. Use it to confirm a layout switch landed, to detect that the user has moved since a setup was saved, and to state which chart a reading describes.', {}, async () => {
+    try { return jsonResult(await core.layoutGetActive()); }
+    catch (err) { return errorResult(err); }
+  });
+
   server.tool('layout_switch', 'Switch to a saved chart layout by name or ID. Stops rather than discarding unsaved changes on the current chart unless discard_unsaved is set.', {
     name: z.string().describe('Name or ID of the layout to switch to'),
     discard_unsaved: z.coerce.boolean().optional().default(false).describe('Throw away unsaved changes on the current chart. Without this, a chart with unsaved work stops the switch instead of losing it.'),

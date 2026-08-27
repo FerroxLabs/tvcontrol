@@ -175,6 +175,18 @@ export async function getState({ _deps } = {}) {
       return {
         symbol: chart.symbol(),
         resolution: chart.resolution(),
+        // WHICH CHART IS THIS? With more than one TradingView tab open this function
+        // describes exactly one of them and used to say nothing about which. Measured
+        // 2026-08-27: it reported NASDAQ:QBTS @ 1D, correctly, while the person was looking
+        // at a crypto chart in another tab, and the caller had no way to tell. Read here in
+        // the SAME page call rather than as a second round trip, so state reads cost what
+        // they always cost.
+        // Split rather than match: this string is a TEMPLATE LITERAL, so a regex written
+        // here has its backslashes eaten before the page ever sees it, and /\/chart\//
+        // arrives as //chart// - which opens a comment and takes the rest of the object
+        // with it. The failure is a SyntaxError from deep inside the page, nowhere near
+        // the line that caused it. No backslashes, no hazard.
+        chart_id: (function(){ try { var p = location.pathname.split('/').filter(Boolean); return p[0] === 'chart' && p[1] ? p[1] : null; } catch (e) { return null; } })(),
         // BOTH SPELLINGS, DELIBERATELY. This field shipped as chartType
         // while symbol_info returns the same value as chart_type, and
         // chart_set_type takes chart_type as its argument. One value, three
@@ -208,6 +220,7 @@ export async function getState({ _deps } = {}) {
   `);
   const { _session, ...rest } = state || {};
   const out = { success: true, ...rest };
+
 
   // Surface the failure that otherwise costs someone their whole layout.
   const broken = [];

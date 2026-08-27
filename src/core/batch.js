@@ -9,7 +9,7 @@
 import { getClient } from '../connection.js';
 import { waitForChartReady } from '../wait.js';
 import * as chart from './chart.js';
-import { getOhlcv, getStrategyResults, getStudyValues } from './data.js';
+import { getOhlcv, getStrategyResults, getStudyValues, getPineTables } from './data.js';
 import { writeFileSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -18,7 +18,13 @@ import { ClassifiedError, CATEGORIES } from '../errors.js';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SCREENSHOT_DIR = join(dirname(dirname(__dirname)), 'screenshots');
 
-const VALID_ACTIONS = new Set(['screenshot', 'get_ohlcv', 'get_strategy_results', 'get_study_values']);
+// `get_pine_tables` is here because a Pine strategy's own decision table is the one output a
+// universe scan most often wants, and reading it per symbol was previously only possible by
+// driving set_symbol and data_get_pine_tables in a loop from outside. That loop cannot live in
+// an agent (one round trip per symbol, 74 symbols) and it cannot always live in a script
+// either: some hosts confine a skill's filesystem writes to the workspace and give a script no
+// way to resolve this package. Running the sweep here removes both problems.
+const VALID_ACTIONS = new Set(['screenshot', 'get_ohlcv', 'get_strategy_results', 'get_study_values', 'get_pine_tables']);
 
 async function _captureScreenshot(symbol, tf) {
   mkdirSync(SCREENSHOT_DIR, { recursive: true });
@@ -40,12 +46,13 @@ function _resolve(deps) {
     getOhlcv: deps?.getOhlcv || getOhlcv,
     getStrategyResults: deps?.getStrategyResults || getStrategyResults,
     getStudyValues: deps?.getStudyValues || getStudyValues,
+    getPineTables: deps?.getPineTables || getPineTables,
     captureScreenshot: deps?.captureScreenshot || _captureScreenshot,
     sleep: deps?.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
   };
 }
 
-export async function batchRun({ symbols, timeframes, action, delay_ms, ohlcv_count, entity_id, restore_start_state = true, _deps }) {
+export async function batchRun({ symbols, timeframes, action, delay_ms, ohlcv_count, entity_id, study_filter, restore_start_state = true, _deps }) {
   if (!VALID_ACTIONS.has(action)) {
     throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, `Unknown action: ${action}. Valid: ${[...VALID_ACTIONS].join(', ')}`);
   }
@@ -101,6 +108,8 @@ export async function batchRun({ symbols, timeframes, action, delay_ms, ohlcv_co
             actionResult = await deps.getOhlcv({ count: ohlcv_count, summary: true, _deps });
           } else if (action === 'get_strategy_results') {
             actionResult = await deps.getStrategyResults({ entity_id, _deps });
+          } else if (action === 'get_pine_tables') {
+            actionResult = await deps.getPineTables({ study_filter });
           } else if (action === 'get_study_values') {
             // THIS ACTION WAS DOCUMENTED BUT NEVER IMPLEMENTED. The server's
             // own tool guide and the market-open scan skill both instruct

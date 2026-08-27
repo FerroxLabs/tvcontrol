@@ -168,6 +168,110 @@ export async function addStudyFromSearch({ query, match, section, _deps } = {}) 
   };
 }
 
+/**
+ * Read a study's current input values back.
+ *
+ * `setInputs` could write them and nothing could read them, so a caller could never confirm
+ * that a change landed, detect that someone had altered a setting by hand, or record the
+ * configuration a result was produced under. An action with no confirmation is the same class
+ * of defect as a chart read that does not say which chart it describes: it forces the caller
+ * to assume, and assumptions are what this connector exists to remove.
+ *
+ * Where the study exposes input metadata, the human-readable name and type are attached. They
+ * are a convenience only — `id` is the key `setInputs` takes, and the id is always returned.
+ */
+export async function getInputs({ entity_id, _deps } = {}) {
+  const deps = _resolve(_deps);
+  if (!entity_id) {
+    throw new ClassifiedError(
+      CATEGORIES.INVALID_ARGUMENT,
+      'entity_id is required. Use chart_get_state to find study IDs.',
+    );
+  }
+  const result = await deps.evaluate(`
+    (function() {
+      var chart = ${CHART_API};
+      ${STUDY_RESOLVER_JS()}
+      var __r = __tvResolveStudy(chart, ${safeString(entity_id)});
+      if (__r.error) return { error: __r.error };
+      var study = __r.study;
+      if (!study) return { error: 'Study not found: ' + ${safeString(entity_id)} };
+
+      var values = [];
+      try { values = study.getInputValues() || []; } catch (e) { return { error: 'getInputValues failed: ' + e.message }; }
+
+      // Input metadata lives on the study's metaInfo and is not always present - a protected
+      // or published script can withhold it. Missing metadata is not an error; the ids and
+      // values are the contract.
+      var meta = {};
+      try {
+        var mi = study.metaInfo && study.metaInfo();
+        var defs = mi && mi.inputs;
+        if (defs && defs.length) {
+          for (var i = 0; i < defs.length; i++) {
+            if (defs[i] && defs[i].id !== undefined) meta[defs[i].id] = { name: defs[i].name || null, type: defs[i].type || null };
+          }
+        }
+      } catch (e) {}
+
+      // OVERSIZED VALUES ARE REPORTED, NOT RETURNED.
+      //
+      // A protected or published Pine script carries its encoded source as an ordinary
+      // input. Measured on a real strategy: 73 inputs, one of which was a 53KB blob. Handing
+      // that back whole makes this tool unusable by the agents it exists for — it would
+      // consume more of their context than every other reading in a scan combined, to say
+      // nothing a caller can act on. So a long value is replaced by its length, and the fact
+      // that it was replaced is stated. core/state.js does the same thing for the same
+      // reason; the two must not disagree about what counts as too long.
+      var MAX = 512;
+      var out = [];
+      var stripped = [];
+      for (var j = 0; j < values.length; j++) {
+        var v = values[j];
+        var m = meta[v.id] || {};
+        var entry = { id: v.id };
+        var raw = v.value;
+        if (typeof raw === 'string' && raw.length > MAX) {
+          entry.value = null;
+          entry.value_length = raw.length;
+          entry.value_stripped = true;
+          stripped.push({ id: v.id, value_length: raw.length });
+        } else {
+          entry.value = raw;
+        }
+        if (m.name) entry.name = m.name;
+        if (m.type) entry.type = m.type;
+        out.push(entry);
+      }
+      var name = null;
+      try { var mi2 = study.metaInfo && study.metaInfo(); name = (mi2 && (mi2.description || mi2.shortDescription)) || null; } catch (e) {}
+      return { inputs: out, stripped: stripped, study_name: name, metadata_available: Object.keys(meta).length > 0 };
+    })()
+  `);
+  if (!result) {
+    throw new ClassifiedError(CATEGORIES.API_UNEXPECTED, 'Could not read the study inputs; the chart may still be loading.');
+  }
+  if (result.error) {
+    throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, result.error, { hint: 'Use chart_get_state to list the studies on this chart and their ids.' });
+  }
+  return {
+    success: true,
+    entity_id,
+    study_name: result.study_name || null,
+    count: result.inputs.length,
+    inputs: result.inputs,
+    ...(result.stripped && result.stripped.length
+      ? {
+        stripped_count: result.stripped.length,
+        stripped: result.stripped,
+        stripped_note: `${result.stripped.length} input(s) exceeded 512 characters and are reported by length instead of value. Protected Pine scripts carry their encoded source this way.`,
+      }
+      : {}),
+    // Says WHY a name is missing rather than leaving the caller to guess the study is broken.
+    ...(result.metadata_available ? {} : { note: 'This study did not expose input metadata, so only ids and values are reported. That is normal for protected or published scripts.' }),
+  };
+}
+
 export async function setInputs({ entity_id, inputs: inputsRaw, _deps } = {}) {
   const deps = _resolve(_deps);
   let inputs;

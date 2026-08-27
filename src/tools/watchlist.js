@@ -3,6 +3,18 @@ import { jsonResult, errorResult } from './_format.js';
 import * as core from '../core/watchlist.js';
 
 export function registerWatchlistTools(server) {
+  server.tool('watchlist_list', 'List every custom watchlist on the account with its id, name and symbol count. Use this before scanning: watchlist_get answers "whatever is active", which can name a different list than the panel is showing. Names are not unique, so resolve by id.', {}, async () => {
+    try { return jsonResult(await core.list()); }
+    catch (err) { return errorResult(err); }
+  });
+
+  server.tool('watchlist_get_by_id', 'Get one watchlist\'s membership by explicit id (or exact name). This is what a universe scan should use - it is verifiable, where "active" is not. Refuses rather than guessing when a name matches more than one list.', {
+    name_or_id: z.string().describe('Watchlist id (preferred) or exact name, from watchlist_list'),
+  }, async ({ name_or_id }) => {
+    try { return jsonResult(await core.getById({ name_or_id })); }
+    catch (err) { return errorResult(err); }
+  });
+
   server.tool('watchlist_get', 'Get every symbol in the active TradingView watchlist. Membership comes from the symbols_list API so it is complete even when the panel is scrolled or closed. Quote cells are best effort and only present when the watchlist panel is open; check quotes_available.', {}, async () => {
     try { return jsonResult(await core.get()); }
     catch (err) { return errorResult(err); }

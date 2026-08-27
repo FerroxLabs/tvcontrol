@@ -145,6 +145,146 @@ async function _apiMutate(evaluateAsync, listId, verb, symbols) {
   return r;
 }
 
+
+/**
+ * Every custom watchlist on the account, with its id, name and symbol count.
+ *
+ * Nothing in the tool surface could do this. `get()` reads whatever the API calls the
+ * ACTIVE list, and that has been measured naming a different list than the panel is
+ * showing, so "what lists do I have" and "which one am I looking at" were both
+ * unanswerable. A caller that wants a specific universe had no way to ask for it by name.
+ *
+ * Names are NOT unique on a real account — duplicates are common — so the id is the key and
+ * the name is a label. Callers that resolve by name must handle more than one match rather
+ * than taking the first.
+ */
+export async function list({ _deps } = {}) {
+  const { evaluateAsync } = _resolve(_deps);
+  const r = await evaluateAsync(`
+    (async function(){
+      try {
+        var res = await fetch(${JSON.stringify(WL_API)} + 'custom/', { credentials: 'include' });
+        if (!res.ok) return { ok: false, status: res.status };
+        var j = await res.json();
+        if (!Array.isArray(j)) return { ok: false, shape: j ? Object.keys(j).slice(0, 12) : null };
+        return { ok: true, lists: j.map(function(l){
+          var syms = (l.symbols || []).filter(function(x){ return String(x).indexOf('###') !== 0; });
+          return { id: l.id, name: l.name, count: syms.length, sections: (l.symbols || []).length - syms.length };
+        }) };
+      } catch (e) { return { ok: false, error: e.message }; }
+    })()
+  `);
+  if (!r || !r.ok) {
+    throw new ClassifiedError(
+      CATEGORIES.API_UNEXPECTED,
+      `Could not list watchlists (${r && r.status ? 'status ' + r.status : (r && r.shape ? 'unexpected shape: ' + r.shape.join(', ') : (r && r.error) || 'unknown')})`,
+      { hint: 'Usually an expired session. Reload TradingView, confirm you are logged in, and retry.' },
+    );
+  }
+  // A Map, not an object literal: watchlist names are user-controlled, and a list named
+  // "__proto__" or "constructor" silently defeats counting on a plain object - two lists
+  // called "__proto__" reported no duplicates at all.
+  const dupes = new Map();
+  for (const l of r.lists) dupes.set(l.name, (dupes.get(l.name) || 0) + 1);
+  // A record without an id cannot be resolved later, so it is not a usable list. Report it
+  // rather than returning something that will fail confusingly at the point of use.
+  const unusable = r.lists.filter((l) => l.id === undefined || l.id === null);
+  return {
+    success: true,
+    count: r.lists.length,
+    lists: r.lists,
+    ...(unusable.length ? { unusable_count: unusable.length, unusable_note: `${unusable.length} watchlist record(s) came back without an id and cannot be selected.` } : {}),
+    // Named up front so a caller resolving by name is not surprised later.
+    duplicate_names: [...dupes.entries()].filter(([, n]) => n > 1).map(([name]) => name),
+    source: 'symbols_list_api',
+  };
+}
+
+/**
+ * One watchlist's membership, chosen explicitly by id or by name.
+ * This is what a scan should use. `get()` answers "whatever is active", which is a question
+ * with an unreliable answer; this answers "the list I named", which is verifiable.
+ */
+export async function getById({ name_or_id, _deps } = {}) {
+  const { evaluateAsync } = _resolve(_deps);
+  if (name_or_id === undefined || name_or_id === null || String(name_or_id).trim() === '') {
+    throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'name_or_id is required', { hint: 'Call watchlist_list to see the available ids and names.' });
+  }
+  const all = (await list({ _deps })).lists;
+  const wanted = String(name_or_id).trim();
+  const byId = all.find((l) => String(l.id) === wanted);
+  // Exact name first, then case-insensitive. A user who types the name as they see it in
+  // the panel should not be refused over capitalisation, but an exact match must still win
+  // outright so two lists differing only in case stay distinguishable.
+  let byName = all.filter((l) => l.name === wanted);
+  if (!byName.length) byName = all.filter((l) => l.name.toLowerCase() === wanted.toLowerCase());
+  // An id that is ALSO some other list's exact name is genuinely ambiguous. Silently
+  // preferring the id would scan a universe the caller did not ask for, which is the whole
+  // failure this function exists to prevent.
+  if (byId && byName.length && String(byName[0].id) !== String(byId.id)) {
+    throw new ClassifiedError(
+      CATEGORIES.INVALID_ARGUMENT,
+      `"${wanted}" is both the id of "${byId.name}" and the name of a different watchlist (id ${byName[0].id})`,
+      { hint: 'Pass the id of the one you mean. Choosing for you would scan the wrong universe.' },
+    );
+  }
+  const hits = byId ? [byId] : byName;
+  if (!hits.length) {
+    throw new ClassifiedError(
+      CATEGORIES.INVALID_ARGUMENT,
+      `No watchlist "${wanted}"`,
+      { hint: `Available: ${all.map((l) => `${l.name} (${l.id})`).join(', ')}` },
+    );
+  }
+  if (hits.length > 1) {
+    throw new ClassifiedError(
+      CATEGORIES.INVALID_ARGUMENT,
+      `${hits.length} watchlists are named "${wanted}" (ids ${hits.map((h) => h.id).join(', ')})`,
+      { hint: 'Pass the id instead of the name. Picking one for you would silently scan the wrong universe.' },
+    );
+  }
+  const chosen = hits[0];
+  const r = await evaluateAsync(`
+    (async function(){
+      try {
+        var res = await fetch(${JSON.stringify(WL_API)} + 'custom/' + ${JSON.stringify(String(chosen.id))} + '/', { credentials: 'include' });
+        if (!res.ok) return { ok: false, status: res.status };
+        var j = await res.json();
+        if (!j || !Array.isArray(j.symbols)) return { ok: false, shape: j ? Object.keys(j).slice(0, 12) : null };
+        return { ok: true, id: j.id, name: j.name, symbols: j.symbols };
+      } catch (e) { return { ok: false, error: e.message }; }
+    })()
+  `);
+  if (!r || !r.ok) {
+    throw new ClassifiedError(
+      CATEGORIES.API_UNEXPECTED,
+      `Could not read watchlist ${chosen.id} (${r && r.status ? 'status ' + r.status : (r && r.error) || 'unexpected shape'})`,
+    );
+  }
+  // The detail response must be the list we asked for. Without this check a redirect, a
+  // cached body, or an id the server reinterprets would hand back a different universe
+  // under the name the caller believes it selected - silently, and with full confidence.
+  if (String(r.id) !== String(chosen.id)) {
+    throw new ClassifiedError(
+      CATEGORIES.API_UNEXPECTED,
+      `Asked for watchlist ${chosen.id} ("${chosen.name}") but the server returned ${r.id} ("${r.name}")`,
+      { hint: 'Nothing was read. Retry, and if it persists reload TradingView.' },
+    );
+  }
+  const symbols = r.symbols.filter((x) => !_isHeader(x));
+  return {
+    success: true,
+    watchlist: r.name,
+    watchlist_id: r.id,
+    count: symbols.length,
+    symbols: symbols.map((sym) => ({ symbol: sym })),
+    sections: r.symbols.filter((x) => _isHeader(x)),
+    entries: r.symbols.map(String),
+    resolved_by: byId ? 'id' : 'name',
+    source: 'symbols_list_api',
+  };
+}
+
 export async function get({ _deps } = {}) {
   const { evaluate, evaluateAsync, wait } = _resolve(_deps);
 
@@ -219,8 +359,23 @@ export async function get({ _deps } = {}) {
     // The panel is rendering symbols, none of which are in this list. Almost
     // always means the visible watchlist is not the active one. Worth saying
     // out loud rather than returning a silently price-free list.
-    ...(matchedQuotes === 0 && domSymbolCount > 0
-      ? { quote_note: `The watchlist panel is showing ${domSymbolCount} symbol(s) from a different list, so no prices could be attached. Membership below is authoritative.` }
+    // Disputed when the panel is rendering rows this list does not contain - not only when
+    // NOTHING matches. Two different watchlists that happen to share one symbol would
+    // otherwise suppress the warning entirely, and a partial overlap is exactly the case a
+    // human eye would not catch either.
+    ...(domSymbolCount > matchedQuotes && domSymbolCount > 0
+      ? {
+        quote_note: `The watchlist panel is rendering ${domSymbolCount} symbol(s), of which ${matchedQuotes} are in this list.`,
+        // NOT "authoritative". This is the membership of whatever the API calls ACTIVE, and
+        // when the panel is rendering a different list that answer has been measured wrong:
+        // 29 crypto returned while the panel showed 74 equities. Saying "authoritative" here
+        // told callers to trust the one number in this payload least worth trusting, and
+        // three shipped skills scanned an unknown universe on the strength of it.
+        active_list_disputed: true,
+        active_list_warning:
+          'The API\'s "active" list and the visible panel disagree, so this may not be the list you are looking at. '
+          + 'Do not scan on this. Call watchlist_list, then watchlist_get_by_id with an explicit id.',
+      }
       : {}),
     source: 'symbols_list_api',
   };

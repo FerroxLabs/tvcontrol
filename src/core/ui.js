@@ -347,6 +347,47 @@ export async function layoutList({ limit = 50, offset = 0, include_details = fal
   };
 }
 
+/**
+ * Which saved layout the attached chart is currently showing.
+ *
+ * You could list layouts and switch to one, but never ask which one you were on, so
+ * "did that switch land", "has the user moved since we saved this setup", and "what am I
+ * looking at" were all unanswerable. Callers reconstructed it by hand from the chart URL,
+ * which is exactly the kind of private join that goes stale without anyone noticing.
+ *
+ * The join is exact: the chart URL carries the layout slug, and each saved chart record
+ * carries the same slug in its `url` field.
+ */
+export async function layoutGetActive() {
+  const href = String(await evaluate('location.href'));
+  const parts = href.split('/chart/');
+  const slug = parts.length > 1 ? parts[1].split(/[/?#]/)[0] : null;
+  if (!slug) {
+    return { success: true, layout: null, chart_id: null, note: 'The attached tab is not a chart URL.' };
+  }
+  const raw = await evaluateAsync(`
+    new Promise(function(resolve) {
+      try {
+        window.TradingViewApi.getSavedCharts(function(c) {
+          resolve(JSON.stringify((c || []).map(function(x) { return { id: x.id, name: x.name, url: x.url, resolution: x.resolution }; })));
+        });
+        setTimeout(function() { resolve('[]'); }, 6000);
+      } catch (e) { resolve('[]'); }
+    })
+  `);
+  let saved = [];
+  try { saved = JSON.parse(typeof raw === 'string' ? raw : '[]'); } catch { saved = []; }
+  const match = saved.find((x) => x.url === slug) || null;
+  return {
+    success: true,
+    chart_id: slug,
+    layout: match ? { id: match.id, name: match.name, resolution: match.resolution } : null,
+    // An unsaved chart has a slug with no saved record behind it. Say which case this is
+    // rather than returning a bare null the caller has to interpret.
+    ...(match ? {} : { note: 'This chart does not correspond to a saved layout. It may be an unsaved chart, or the layout list did not load.' }),
+  };
+}
+
 export async function layoutSwitch({ name, discard_unsaved = false }) {
   const escaped = JSON.stringify(name);
   // WHAT THE CHART LOOKED LIKE BEFORE, READ BEFORE ANYTHING IS FIRED.

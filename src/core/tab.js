@@ -6,6 +6,7 @@
  * shell tab, so all visible tab mutations are driven through the shell DOM.
  */
 import CDP from 'chrome-remote-interface';
+import { evaluate as _evaluate, evaluateAsync as _evaluateAsync, getTargetInfo } from '../connection.js';
 import { _assertCdpAllowed, CDP_HOST, CDP_PORT, reconnectToTarget, _fetchCdpJson, _withConnectionTimeout } from '../connection.js';
 import { ClassifiedError, CATEGORIES } from '../errors.js';
 
@@ -98,8 +99,72 @@ async function _list({ includeTargetIds = false } = {}) {
   return { success: true, count: tabs.length, tab_count: tabs.length, tabs };
 }
 
-export async function list() {
-  return _list();
+/**
+ * WHICH TAB ARE WE ACTUALLY DRIVING, AND WHAT LAYOUT IS ON EACH.
+ *
+ * With two chart tabs open, every read in this connector describes ONE of them and says
+ * nothing about which. Measured 2026-08-27: `chart_get_state` and `tv_chart_health` both
+ * reported NASDAQ:QBTS @ 1D with full confidence while the person was watching a crypto
+ * chart in the other tab. Both were telling the truth. Four separate root causes were
+ * chased and none of them existed — the readings simply belonged to a screen nobody was
+ * looking at.
+ *
+ * So `list()` now marks the attached tab and names the saved layout each tab holds. The
+ * join is exact: a tab's URL carries the layout slug, and each saved chart record carries
+ * the same slug in its `url` field.
+ */
+export async function list({ resolve_layouts = false } = {}) {
+  // Identity comes from the CDP TARGET, not from the layout the tab happens to show. Two
+  // tabs can display the same saved layout, and a slug comparison then marks BOTH attached
+  // and picks the first arbitrarily - re-labelling the very incident this was added to
+  // prevent. The target id is unique per tab and is what the connection is actually bound to.
+  const base = await _list({ includeTargetIds: true });
+  let attachedTargetId = null;
+  try {
+    const info = await getTargetInfo();
+    attachedTargetId = info?.id ?? null;
+  } catch { /* identity is best-effort; never fail a listing over it */ }
+
+  let byslug = new Map();
+  if (resolve_layouts) {
+    try {
+      const raw = await _evaluateAsync(`new Promise(function(resolve){
+        window.TradingViewApi.getSavedCharts(function(c){ resolve(JSON.stringify((c||[]).map(function(x){return {id:x.id,name:x.name,url:x.url,resolution:x.resolution};}))); });
+        setTimeout(function(){resolve('[]')},6000);
+      })`);
+      const saved = JSON.parse(typeof raw === 'string' ? raw : '[]');
+      byslug = new Map(saved.map((x) => [x.url, x]));
+    } catch { /* layout names are a convenience, not a contract */ }
+  }
+
+  const tabs = base.tabs.map((t) => {
+    const lay = byslug.get(t.chart_id) || null;
+    const { target_id, ...rest } = t;
+    return {
+      ...rest,
+      attached: attachedTargetId !== null && target_id === attachedTargetId,
+      layout_id: lay?.id ?? null,
+      layout_name: lay?.name ?? null,
+      layout_timeframe: lay?.resolution ?? null,
+    };
+  });
+  const me = tabs.find((t) => t.attached) || null;
+  return {
+    ...base,
+    tabs,
+    attached_chart_id: me?.chart_id ?? null,
+    attached_index: me?.index ?? null,
+    // Named by what the user can SEE, not by a /json/list position. This module already
+    // documents that CDP-target order and the visible tab strip diverge, so calling an
+    // index "tab N" in a warning invites the reader to look at the wrong one.
+    ...(tabs.length > 1
+      ? {
+        multiple_tabs_warning: `${tabs.length} chart tabs are open. Every reading from this connector describes only the attached one`
+          + (me ? ` (${me.layout_name ? `layout "${me.layout_name}"` : `chart ${me.chart_id}`}${me.layout_timeframe ? ` @ ${me.layout_timeframe}` : ''})` : ' (which could not be identified)')
+          + '. Confirm that is the one the user means before reporting chart state.',
+      }
+      : {}),
+  };
 }
 
 export async function newTab({ layout, name } = {}) {

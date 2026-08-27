@@ -20,6 +20,13 @@ export function registerIndicatorTools(server) {
     catch (err) { return errorResult(err); }
   });
 
+  server.tool('indicator_get_inputs', 'Read a study\'s current input values back. Use this to confirm indicator_set_inputs landed, to detect settings changed by hand, or to record the configuration a result was produced under.', {
+    entity_id: z.string().describe('Entity ID of the study (from chart_get_state)'),
+  }, async ({ entity_id }) => {
+    try { return jsonResult(await core.getInputs({ entity_id })); }
+    catch (err) { return errorResult(err); }
+  });
+
   server.tool('indicator_set_inputs', 'Change indicator/study input values (e.g., length, source, period)', {
     entity_id: z.string().describe('Entity ID of the study (from chart_get_state)'),
     inputs: z.string().describe('JSON string of input overrides, e.g. \'{"length": 50, "source": "close"}\'. Keys are input IDs, values are the new values.'),

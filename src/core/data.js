@@ -992,12 +992,36 @@ export async function getPineTables({ study_filter } = {}) {
     }
     const tableList = Object.entries(tables).map(([tid, rows]) => {
       const rowNums = Object.keys(rows).map(Number).sort((a, b) => a - b);
+      // POSITIONALLY FAITHFUL CELLS, alongside the joined strings.
+      //
+      // `rows` drops empty cells before joining, so a table with a blank middle column comes
+      // back shifted: what the indicator drew in column 3 arrives as column 2 and a consumer
+      // splitting on the separator reads the wrong field. It is also the reason every
+      // consumer of this tool writes its own splitter and its own assumptions about which
+      // position means what.
+      //
+      // `cells` preserves the grid: one array per row, one entry per column, empty strings
+      // kept. `rows` is unchanged so nothing that already reads it has to move.
+      // Column indices come from the indicator, which is page-supplied data. A study
+      // reporting a column index of 2^31 would otherwise drive a dense allocation of that
+      // length and take the process out. Coordinates are validated and the width capped;
+      // a table wider than this is not a dashboard anyone is reading.
+      const MAX_COLS = 64;
+      const cells = rowNums.map(rn => {
+        const cols = rows[rn];
+        const colNums = Object.keys(cols)
+          .map(Number)
+          .filter(n => Number.isInteger(n) && n >= 0 && n < MAX_COLS)
+          .sort((a, b) => a - b);
+        const width = colNums.length ? colNums[colNums.length - 1] + 1 : 0;
+        return Array.from({ length: width }, (_, i) => cols[i] ?? '');
+      });
       const formatted = rowNums.map(rn => {
         const cols = rows[rn];
         const colNums = Object.keys(cols).map(Number).sort((a, b) => a - b);
         return colNums.map(cn => cols[cn]).filter(Boolean).join(' | ');
       }).filter(Boolean);
-      return { rows: formatted };
+      return { rows: formatted, cells };
     });
     return { name: s.name, tables: tableList };
   });
