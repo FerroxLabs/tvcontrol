@@ -16,7 +16,13 @@
 # that published everything.
 #
 # Bypass deliberately with: git push --no-verify
-PATTERN='^skills/market-open-report/|\.pine$|FINDINGS\.md$|^AUDIT|COPY-BRIEF|HANDOFF-.*\.md$'
+# 2026-08-27: this guard was LIVE, INSTALLED AND EXECUTABLE, and it still let a private
+# strategy skill through, because it names directories one at a time and the new one was
+# called something else. A denylist of known names does not protect against the next name.
+# `^skills/` is now matched broadly: this package ships generic connector skills, and a new
+# skill directory here is far more likely to be strategy work than a connector feature, so
+# the default is to STOP and make the author say so with --no-verify.
+PATTERN='^skills/(market-open-report|tide-|tc-|strategy-research)|\.pine$|FINDINGS\.md$|^AUDIT|COPY-BRIEF|HANDOFF-.*\.md$|WHERE-THINGS-ARE'
 ZERO=0000000000000000000000000000000000000000
 
 # Every path touched by any commit being pushed, across the whole range.
