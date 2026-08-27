@@ -12,8 +12,8 @@ export function registerBatchTools(server) {
     study_filter: z.string().optional().describe('For get_pine_tables: substring matching the indicator whose table to read. Omit for all.'),
     entity_id: z.string().min(1).max(200).optional().describe('Exact strategy entity ID for get_strategy_results; recommended when more than one strategy is present'),
     restore_start_state: z.coerce.boolean().optional().describe('Restore the starting chart symbol/timeframe in a guaranteed cleanup path (default true)'),
-  }, async ({ symbols, timeframes, action, delay_ms, ohlcv_count, entity_id, restore_start_state }) => {
-    try { return jsonResult(await core.batchRun({ symbols, timeframes, action, delay_ms, ohlcv_count, entity_id, restore_start_state })); }
+  }, async ({ symbols, timeframes, action, delay_ms, ohlcv_count, study_filter, entity_id, restore_start_state }) => {
+    try { return jsonResult(await core.batchRun({ symbols, timeframes, action, delay_ms, ohlcv_count, study_filter, entity_id, restore_start_state })); }
     catch (err) { return errorResult(err); }
   });
 }

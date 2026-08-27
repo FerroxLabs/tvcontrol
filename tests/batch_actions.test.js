@@ -67,11 +67,43 @@ test('the core accepts get_pine_tables', () => {
     'VALID_ACTIONS no longer contains get_pine_tables; the tool accepts a call the core refuses');
 });
 
-test('study_filter reaches the core rather than being dropped at the tool', () => {
-  // Without this the tool advertises an argument it silently discards, and every
-  // symbol comes back carrying every indicator on the chart.
-  assert.ok(/study_filter/.test(tool), 'the tool no longer declares study_filter');
-  assert.ok(/study_filter/.test(core), 'the core no longer accepts study_filter');
+test('study_filter reaches the core rather than being dropped at the tool', async () => {
+  // REWRITTEN. The previous version grepped both source files for the string
+  // `study_filter` and PASSED WHILE THE BUG IT NAMES WAS LIVE: the tool DECLARED
+  // study_filter in its zod schema (so the grep hit) and then never destructured
+  // or forwarded it, so `core.batchRun` always received `study_filter:
+  // undefined` and every symbol came back carrying every indicator on the chart.
+  // Same failure class as the 2.4.0 dead handlers - the test inspected that
+  // something was declared, never that it arrived.
+  //
+  // A file-level grep structurally cannot see a value dropped BETWEEN the schema
+  // and the call, because both mentions live in the same file. So this registers
+  // the tool for real and inspects the LIVE HANDLER FUNCTION that MCP will
+  // invoke - its actual parameter destructuring and its actual forwarding call -
+  // rather than the file it happens to be defined in.
+  //
+  // LIMIT, stated: this reads the registered function's own source, so it proves
+  // the parameter is destructured and forwarded. It does not execute a CDP round
+  // trip; `get_pine_tables DISPATCHES to the pine-table reader` below covers the
+  // core's use of the value.
+  const { registerBatchTools } = await import('../src/tools/batch.js');
+
+  let handler = null;
+  registerBatchTools({ tool: (_name, _desc, _schema, fn) => { handler = fn; } });
+  assert.ok(handler, 'batch_run did not register a handler');
+
+  const src = handler.toString();
+  const arrow = src.indexOf('=>');
+  const callAt = src.indexOf('core.batchRun(');
+  assert.ok(arrow > 0 && callAt > 0, 'batch_run handler is not the expected shape');
+
+  const params = src.slice(0, arrow);
+  const call = src.slice(callAt);
+
+  assert.ok(/study_filter/.test(params),
+    'batch_run does not DESTRUCTURE study_filter, so the value the schema accepts is discarded on entry');
+  assert.ok(/study_filter/.test(call),
+    'batch_run does not FORWARD study_filter to core.batchRun - every symbol will return every indicator on the chart');
 });
 
 test('get_pine_tables DISPATCHES to the pine-table reader', async () => {
