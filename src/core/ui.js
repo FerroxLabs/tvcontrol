@@ -414,26 +414,91 @@ export async function layoutSwitch({ name, discard_unsaved = false }) {
     })()
   `);
 
+  // WHY THE ENTRY OBJECT AND NOT THE ID.
+  //
+  // `loadChartFromServer(id)` is a one-line shim over the real service, and on
+  // TradingView Desktop 3.3.0 it reads (verified by reading the live function):
+  //
+  //     async loadChartFromServer(e){ await (this._loadChartService?.loadChart(e,!1)) }
+  //
+  // `loadChart(entry, openInNewTab, skipUnsavedCheck)` wants the SAVED-CHART
+  // ENTRY, not an id: it builds the route from `entry.url` and hands the whole
+  // object to `backend.loadLayout(entry)`. Passing a bare number makes
+  // `entry.url` undefined, so it navigates to `/chart/undefined/` and NOTHING
+  // HAPPENS - no throw, no rejected promise, just a chart that never moves.
+  // That is exactly the failure this tool reported for three releases: called,
+  // claimed, never switched. So always resolve the entry first, for the id path
+  // as well as the name path, and call the service directly.
+  //
+  // The third argument is the unsaved-changes bypass. Passing `discard_unsaved`
+  // straight through lets TradingView skip its own dialog when the caller has
+  // deliberately asked to discard, instead of us firing the switch and then
+  // hunting the DOM for a button to click. The button-clicking path below stays
+  // as the fallback for builds that still raise the dialog.
   const result = await evaluateAsync(`
     new Promise(function(resolve) {
       try {
-        var target = ${escaped};
-        if (/^\\d+$/.test(target)) { window.TradingViewApi.loadChartFromServer(target); resolve({success: true, method: 'loadChartFromServer', id: target, source: 'internal_api'}); return; }
-        window.TradingViewApi.getSavedCharts(function(charts) {
+        var target = String(${escaped});
+        var api = window.TradingViewApi;
+        var svc = api._loadChartService;
+        api.getSavedCharts(function(charts) {
           if (!charts || !Array.isArray(charts)) { resolve({success: false, error: 'getSavedCharts returned no data', source: 'internal_api'}); return; }
+          var lower = target.toLowerCase();
           var match = null;
-          for (var i = 0; i < charts.length; i++) { var cname = charts[i].name || charts[i].title || ''; if (cname === target || cname.toLowerCase() === target.toLowerCase()) { match = charts[i]; break; } }
-          if (!match) { for (var j = 0; j < charts.length; j++) { var cn = (charts[j].name || charts[j].title || '').toLowerCase(); if (cn.indexOf(target.toLowerCase()) !== -1) { match = charts[j]; break; } } }
+          // An id is unambiguous, so it wins outright.
+          if (/^\\d+$/.test(target)) {
+            for (var i = 0; i < charts.length; i++) { if (String(charts[i].id) === target) { match = charts[i]; break; } }
+            if (!match) { resolve({success: false, error: 'No saved layout has id ' + target + '. Re-run layout_list.', source: 'internal_api'}); return; }
+          }
+          if (!match) {
+            for (var j = 0; j < charts.length; j++) { var cname = (charts[j].name || charts[j].title || ''); if (cname.toLowerCase() === lower) { match = charts[j]; break; } }
+          }
+          // NEVER GUESS BETWEEN SIMILAR NAMES. A substring match used to take
+          // the first hit, so "TCTide" could silently resolve to "TCTide
+          // Crypto" and hand a stocks scan the crypto book with no error
+          // anywhere. A partial name is only allowed to resolve when exactly
+          // one layout matches it.
+          if (!match) {
+            var near = [];
+            for (var k = 0; k < charts.length; k++) { var cn = (charts[k].name || charts[k].title || ''); if (cn.toLowerCase().indexOf(lower) !== -1) near.push(charts[k]); }
+            if (near.length === 1) { match = near[0]; }
+            else if (near.length > 1) {
+              var names = near.map(function(c) { return (c.name || c.title) + ' (id ' + c.id + ')'; });
+              resolve({success: false, ambiguous: names, error: 'Layout "' + target + '" is ambiguous - it matches ' + near.length + ': ' + names.join(', ') + '. Pass the exact name or the id.', source: 'internal_api'});
+              return;
+            }
+          }
           if (!match) { resolve({success: false, error: 'Layout "' + target + '" not found.', source: 'internal_api'}); return; }
-          var chartId = match.id || match.chartId;
-          window.TradingViewApi.loadChartFromServer(chartId);
-          resolve({success: true, method: 'loadChartFromServer', id: chartId, name: match.name || match.title, source: 'internal_api'});
+          if (!svc || typeof svc.loadChart !== 'function') {
+            // Older builds: the shim is all there is.
+            api.loadChartFromServer(match.id);
+            resolve({success: true, method: 'loadChartFromServer', id: match.id, name: match.name || match.title, source: 'internal_api'});
+            return;
+          }
+          try {
+            svc.loadChart(match, false, ${discard_unsaved ? 'true' : 'false'});
+          } catch (inner) {
+            resolve({success: false, error: 'loadChart threw: ' + inner.message, source: 'internal_api'});
+            return;
+          }
+          resolve({success: true, method: 'loadChartService.loadChart', id: match.id, url: match.url, name: match.name || match.title, source: 'internal_api'});
         });
         setTimeout(function() { resolve({success: false, error: 'getSavedCharts timed out', source: 'internal_api'}); }, 5000);
       } catch(e) { resolve({success: false, error: e.message, source: 'internal_api'}); }
     })
   `);
-  if (!result?.success) throw new ClassifiedError(CATEGORIES.TV_UI_CHANGED, result?.error || 'Unknown error switching layout');
+  if (!result?.success) {
+    // An ambiguous or unknown NAME is the caller's argument being wrong, not
+    // TradingView's DOM having moved. Classifying it as TV_UI_CHANGED attached
+    // a hint telling the user to file an issue about a UI change, which sends
+    // them chasing a bug that does not exist instead of typing an exact name.
+    const badArg = Array.isArray(result?.ambiguous) || /not found|has id|ambiguous/i.test(result?.error || '');
+    throw new ClassifiedError(
+      badArg ? CATEGORIES.INVALID_ARGUMENT : CATEGORIES.TV_UI_CHANGED,
+      result?.error || 'Unknown error switching layout',
+      badArg ? { hint: 'Run layout_list and pass an exact layout name, or its numeric id.' } : undefined,
+    );
+  }
 
   // THE UNSAVED-CHANGES DIALOG IS A DECISION, NOT A NUISANCE.
   //

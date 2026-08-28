@@ -65,6 +65,48 @@ describe('layout_switch verification', () => {
       'beforeState must be captured BEFORE loadChartFromServer is fired, or the check is inverted');
   });
 
+  it('passes the saved-chart ENTRY to loadChart, never a bare id', () => {
+    // TradingView Desktop 3.3.0: loadChartFromServer(id) is a shim reading
+    //   async loadChartFromServer(e){ await (this._loadChartService?.loadChart(e,!1)) }
+    // and loadChart builds its route from `entry.url` and passes the whole
+    // object to backend.loadLayout(entry). Handing it a number makes
+    // entry.url undefined, so it navigates to /chart/undefined/ and the chart
+    // never moves - no throw, no rejection, just silence. That shipped for
+    // three releases as "called but the chart never changed".
+    assert.match(body, /svc\.loadChart\(match,/,
+      'the switch must pass the resolved saved-chart entry, not an id');
+    assert.ok(!/loadChartFromServer\(target\)/.test(body),
+      'the bare-id call is back - that is the silent no-op on TV 3.3.0');
+  });
+
+  it('resolves a numeric id through the saved-chart list', () => {
+    assert.match(body, /if \(\/\^\\\\d\+\$\/\.test\(target\)\)[\s\S]{0,400}String\(charts\[i\]\.id\) === target/,
+      'an id must be looked up in the chart list so the entry object can be passed');
+    assert.match(body, /No saved layout has id/,
+      'an id with no matching layout must say so rather than falling through to a name search');
+    // NOTE: these are source-contract assertions. They catch a deleted or
+    // rewritten lookup, but they cannot catch every logic mutation (prefixing
+    // the comparison with `false &&` leaves the asserted text intact). The
+    // behavioural guarantee is covered by the live switch, not by this file.
+  });
+
+  it('REFUSES an ambiguous partial name instead of guessing', () => {
+    // "TCTide" substring-matches "TCTide Crypto". The old code took the first
+    // hit, so a stocks scan could silently run against the crypto book with no
+    // error raised anywhere. A partial name may only resolve when it is unique.
+    assert.match(body, /near\.length === 1/,
+      'a partial name may only resolve when exactly one layout matches');
+    assert.match(body, /ambiguous/,
+      'multiple matches must be reported as ambiguous, not silently resolved');
+    assert.ok(!/near\[0\][\s\S]{0,40}break/.test(body),
+      'first-match-wins on a partial name is back');
+  });
+
+  it('classifies a bad layout name as the caller\'s error, not a TradingView UI change', () => {
+    assert.match(body, /badArg \? CATEGORIES\.INVALID_ARGUMENT/,
+      'an unknown or ambiguous name is a bad argument; telling the user to file a UI-change issue sends them chasing a bug that does not exist');
+  });
+
   it('reports an unconfirmed switch rather than a failed one when there was no baseline', () => {
     assert.match(body, /if \(!beforeState\)[\s\S]*?verified: null/,
       'a missing baseline is unproven, not failed');
