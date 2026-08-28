@@ -2,6 +2,42 @@
 
 All notable changes to TVControl are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [2.4.2] - 2026-08-28
+
+### Fixed
+
+- **`layout_switch` against TradingView Desktop 3.3.0** — it reported success while the
+  chart never moved. Reading the live function shows why:
+  `async loadChartFromServer(e){ await (this._loadChartService?.loadChart(e,!1)) }`.
+  `loadChart(entry, openInNewTab, skipUnsavedCheck)` wants the SAVED-CHART ENTRY, not an id:
+  it builds its route from `entry.url` and hands the whole object to
+  `backend.loadLayout(entry)`. A bare number leaves `entry.url` undefined, so it navigates to
+  `/chart/undefined/` and NOTHING HAPPENS — no throw, no rejected promise, just a chart that
+  never changes. The id path did exactly that, and the name path resolved an entry only to
+  throw its id back at the same shim.
+
+  Both paths now resolve the entry and call the service directly, with `discard_unsaved`
+  passed as the third argument so TradingView skips its own dialog when discarding was
+  actually requested. The button-clicking path stays as a fallback for builds that still
+  raise the dialog, and the `loadChartFromServer` shim stays for builds with no
+  `_loadChartService`.
+
+  This matters beyond one tool: an unattended scan that cannot change layout silently reads
+  whatever chart happens to be open, and `tv_compatibility_check` reported
+  `compatible: true` throughout, so the failure was completely silent.
+
+- **`layout_switch` no longer guesses between similar layout names.** The partial match took
+  the first hit, so `TCTide` could resolve to **`TCTide Crypto`** and run a stocks scan
+  against a crypto book with no error raised anywhere. A partial name now resolves only when
+  exactly one layout matches it; more than one is refused with every candidate named. An
+  unknown or ambiguous name is classified `INVALID_ARGUMENT` rather than `TV_UI_CHANGED`,
+  whose hint told the user to report a TradingView UI change that had not happened.
+
+  Verified live on 3.3.0: switch by id, switch by name, and an ambiguous partial refused with
+  the chart left untouched. Four contract tests added to
+  `tests/layout_switch_contract.test.js`; three of the four are mutation-proven, and the file
+  records that a source-text assertion cannot catch every logic mutation.
+
 ## [2.4.1] - 2026-08-28
 
 ### Added
