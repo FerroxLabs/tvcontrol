@@ -80,7 +80,8 @@ const MUST_NEVER_REGISTER = [
   'ui_click', 'ui_evaluate', 'ui_fullscreen', 'ui_hover', 'ui_keyboard',
   'ui_mouse_click', 'ui_open_panel', 'ui_scroll', 'ui_type_text',
   'watchlist_add', 'watchlist_add_bulk', 'watchlist_remove', 'watchlist_remove_bulk',
-  'watchlist_import', 'watchlist_export',
+  'watchlist_import', 'watchlist_export', 'watchlist_create',
+  'layout_create', 'layout_save',
 ];
 
 describe('read-only allowlist integrity', () => {

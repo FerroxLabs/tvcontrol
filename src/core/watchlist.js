@@ -890,3 +890,89 @@ export async function importFrom({ file_path, mode = 'merge', dry_run = false, _
     errors,
   };
 }
+
+/**
+ * Create a NEW named custom watchlist, optionally populated in the same call.
+ *
+ * Why this exists: `importFrom` and `addBulk` both write into whatever list is
+ * ACTIVE. There was no way to make a list, so a first-run setup could only
+ * borrow a list the user already had - which is exactly how a "fresh install"
+ * test ends up riding on the tester's own account and proving nothing.
+ *
+ *   POST /api/v1/symbols_list/custom/   body {name, symbols[]}  -> the new list
+ *
+ * Note the body shape: an OBJECT here, where append/remove take a bare ARRAY.
+ * Same endpoint family, different contract, and getting it wrong returns 422.
+ *
+ * Duplicate names are allowed by TradingView and have already caused a real
+ * misdiagnosis on this account (two lists called `RebelUOS`), so refuse by
+ * default rather than adding a second list nobody can tell apart by name.
+ */
+export async function createList({ name, symbols = [], allow_duplicate_name = false, _deps } = {}) {
+  const { evaluateAsync } = _resolve(_deps);
+  const title = String(name ?? '').trim();
+  if (!title) {
+    throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'A watchlist name is required.');
+  }
+  const clean = [...new Set((symbols || []).map((s) => String(s).trim()).filter(Boolean))];
+
+  if (!allow_duplicate_name) {
+    const existing = await list({ _deps });
+    const clash = existing.lists.find((l) => l.name === title);
+    if (clash) {
+      throw new ClassifiedError(
+        CATEGORIES.INVALID_ARGUMENT,
+        `A watchlist called "${title}" already exists (id ${clash.id}, ${clash.count} symbols).`,
+        { hint: 'Use that one, pick another name, or pass allow_duplicate_name: true if you really want two lists with the same name.' },
+      );
+    }
+  }
+
+  const r = await evaluateAsync(`
+    (async function(){
+      try {
+        var res = await fetch(${JSON.stringify(WL_API)} + 'custom/', {
+          method: 'POST', credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: ${JSON.stringify(title)}, symbols: ${JSON.stringify(clean)} })
+        });
+        var text = await res.text();
+        var j = null; try { j = JSON.parse(text); } catch (e) {}
+        return { ok: res.ok, status: res.status, id: j && j.id, name: j && j.name, symbols: j && j.symbols, raw: text.slice(0, 200) };
+      } catch (e) { return { ok: false, error: e.message }; }
+    })()
+  `);
+  if (!r || !r.ok) {
+    throw new ClassifiedError(
+      CATEGORIES.API_UNEXPECTED,
+      `Could not create the watchlist (status ${(r && r.status) || '?'}): ${(r && (r.raw || r.error)) || 'unknown'}`,
+      { hint: 'Usually an expired session. Reload TradingView, confirm you are logged in, and retry.' },
+    );
+  }
+  // A 200 that is not a watchlist is this codebase's signature failure. An id
+  // is what every later call needs, so no id means no success.
+  if (r.id === undefined || r.id === null) {
+    throw new ClassifiedError(
+      CATEGORIES.API_UNEXPECTED,
+      `The create endpoint returned ${r.status} but no watchlist id: ${r.raw || 'empty body'}`,
+    );
+  }
+
+  // Read it back. The response describing the creation is the action reporting
+  // on itself; the list showing up in a fresh listing is the account agreeing.
+  const after = await list({ _deps });
+  const seen = after.lists.find((l) => String(l.id) === String(r.id));
+  const stored = (r.symbols || []).filter((s) => !_isHeader(s));
+  const missing = clean.filter((s) => !stored.includes(s));
+
+  return {
+    success: true,
+    id: r.id,
+    name: r.name || title,
+    requested: clean.length,
+    stored: stored.length,
+    confirmed_in_account: !!seen,
+    ...(missing.length ? { missing } : {}),
+    source: 'symbols_list_api',
+  };
+}

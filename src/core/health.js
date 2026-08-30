@@ -451,6 +451,28 @@ function _resolveLaunchDeps(deps) {
   };
 }
 
+/**
+ * Is a TradingView Desktop already running? Used only to turn an opaque
+ * "exited immediately" into an actionable error, so a false answer costs
+ * nothing but a less specific message.
+ *
+ * `pgrep -x` matches the binary name only. `-f` would match the full command
+ * line, so any process whose path contained "TradingView" - this MCP server
+ * included, when run from such a directory - would count as a hit. Same
+ * reasoning as `killExisting` below.
+ */
+function _isTradingViewRunning(deps) {
+  try {
+    if (deps.platform === 'win32') {
+      const out = deps.execFileSync('tasklist', ['/FI', 'IMAGENAME eq TradingView.exe', '/NH'], { timeout: 5000 }).toString();
+      return /TradingView\.exe/i.test(out);
+    }
+    return deps.execFileSync('pgrep', ['-x', 'TradingView'], { timeout: 5000 }).toString().trim().length > 0;
+  } catch {
+    return false;                      // pgrep exits non-zero when nothing matches
+  }
+}
+
 function _spawnDetached(spawnFn, executable, args) {
   const child = spawnFn(executable, args, { detached: true, stdio: 'ignore' });
   child.unref();
@@ -643,7 +665,22 @@ export async function launch({ port, kill_existing, _deps } = {}) {
   } else {
     const earlyFailure = await deps.spawnFailedEarly(child);
     if (earlyFailure) {
-      throw new ClassifiedError(CATEGORIES.TV_NOT_RUNNING, `TradingView failed during startup: ${earlyFailure}`);
+      // AN ALREADY-OPEN TRADINGVIEW IS THE COMMON CASE, NOT A BROKEN INSTALL.
+      // macOS and Windows both refuse a second copy, so the child we just
+      // spawned exits at once and this branch fires. Reported bare, it reads as
+      // "the connector is broken", and a caller with no remedy to reach for
+      // falls back to telling a non-technical user to relaunch from a terminal.
+      // The remedy already exists on this very tool, so name it.
+      const alreadyRunning = !killFirst && _isTradingViewRunning(deps);
+      throw new ClassifiedError(
+        CATEGORIES.TV_NOT_RUNNING,
+        alreadyRunning
+          ? `TradingView is already running without the control port, so the operating system refused a second copy (${earlyFailure}).`
+          : `TradingView failed during startup: ${earlyFailure}`,
+        alreadyRunning
+          ? { hint: 'Call tv_launch again with kill_existing: true to restart it with the control port open. That closes the running copy, so ask first - unsaved Pine, layouts and dialogs are lost.' }
+          : undefined,
+      );
     }
   }
 

@@ -8,6 +8,15 @@ export function registerWatchlistTools(server) {
     catch (err) { return errorResult(err); }
   });
 
+  server.tool('watchlist_create', 'Create a NEW named watchlist, optionally populated in one call. Use this to build a user a list from scratch - watchlist_import and watchlist_add_bulk only write into whichever list is already active, so neither can make one. Returns the new id; pin by id, never by name.', {
+    name: z.string().min(1).describe('Name for the new watchlist, e.g. "TC-TIDE"'),
+    symbols: z.array(z.string()).max(1000).optional().describe('Exchange-prefixed symbols to populate it with, e.g. ["NASDAQ:AAPL","NYSE:GE"]. Duplicates are collapsed.'),
+    allow_duplicate_name: z.coerce.boolean().optional().describe('Create it even when a list of that name already exists (default false). Names are not unique on TradingView and a duplicate cannot be told apart by name afterwards.'),
+  }, async ({ name, symbols, allow_duplicate_name }) => {
+    try { return jsonResult(await core.createList({ name, symbols, allow_duplicate_name })); }
+    catch (err) { return errorResult(err); }
+  });
+
   server.tool('watchlist_get_by_id', 'Get one watchlist\'s membership by explicit id (or exact name). This is what a universe scan should use - it is verifiable, where "active" is not. Refuses rather than guessing when a name matches more than one list.', {
     name_or_id: z.string().describe('Watchlist id (preferred) or exact name, from watchlist_list'),
   }, async ({ name_or_id }) => {

@@ -24,6 +24,20 @@ export function registerUiTools(server) {
     catch (err) { return errorResult(err); }
   });
 
+  server.tool('layout_create', 'Create a NEW chart and save it under this name. Use this to build a user a chart from scratch - layout_list and layout_switch can only reach layouts that already exist. The new chart starts empty: add studies with indicator_add_from_search and set the timeframe, then call layout_save again to keep them. Verified by re-reading the account, not by the return value.', {
+    name: z.string().min(1).describe('Name for the new layout, e.g. "TC-TIDE"'),
+  }, async ({ name }) => {
+    try { return jsonResult(await core.layoutCreate({ name })); }
+    catch (err) { return errorResult(err); }
+  });
+
+  server.tool('layout_save', 'Save the current chart layout silently, with no Save-As dialog. Pass name to save it under that name - that is what names a layout, not layout_create. Call this after changing symbol, timeframe or studies so the layout keeps them. Verifies the account lists it rather than trusting the save.', {
+    name: z.string().min(1).optional().describe('Save under this name. Omit to save the current layout in place.'),
+  }, async ({ name }) => {
+    try { return jsonResult(await core.layoutSave({ name })); }
+    catch (err) { return errorResult(err); }
+  });
+
   server.tool('layout_list', 'List saved chart layouts with bounded pagination', {
     limit: z.coerce.number().int().min(1).max(100).optional().default(50),
     offset: z.coerce.number().int().min(0).optional().default(0),

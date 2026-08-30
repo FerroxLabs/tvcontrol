@@ -2,6 +2,58 @@
 
 All notable changes to TVControl are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [2.4.3] - 2026-08-30
+
+### Added
+
+- **`watchlist_create`** — make a NEW named watchlist and populate it in one call.
+  `watchlist_import` and `watchlist_add_bulk` both write into whichever list is already
+  ACTIVE, so neither could create one. Without a create, a first-run setup can only borrow a
+  list the user already has — which is how a "fresh install" test ends up quietly riding on
+  the tester's own account and proving nothing.
+
+  `POST /api/v1/symbols_list/custom/` with body `{name, symbols}`. Note the shape: an OBJECT,
+  where `append`/`remove` on the same endpoint family take a bare ARRAY. It refuses a
+  duplicate name by default — TradingView allows them, and two lists called `RebelUOS` have
+  already caused one real misdiagnosis on a live account — and it re-reads the account rather
+  than trusting the create response, because a response describing an action is the action
+  reporting on itself.
+
+- **`layout_create` and `layout_save`** — create a new chart layout and save it under a name,
+  with no dialog. Previously `layout_list`, `layout_switch` and `layout_get_active` could only
+  reach layouts that already existed.
+
+  Read live off Desktop 3.4.0 rather than guessed: the obvious names are all traps.
+  `saveNewChart`, `createEmptyChart` and `renameChart` each resolve to `controller.show()` —
+  they open a MODAL and return immediately, so headlessly they report success while a dialog
+  waits for a human who is not there. The two that work silently are `createNewLayout` and
+  `saveChartToServer` → `_saveChartService.saveChartSilently`.
+
+  Naming happens at SAVE time (`opts.chartName`), not at create time — `createNewLayout`
+  ignores its argument as a name.
+
+### Fixed during development, recorded because it reached a live account
+
+- **A first cut of `layout_create` RENAMED a live user's chart.** `createNewLayout` returns a
+  new id and moves the URL via `history.replaceState`, but it does not load that chart into
+  the running widget. The save then wrote the new name to "the current chart" — still the
+  user's own layout — and reported `confirmed_in_account: true`, truthfully, about the wrong
+  chart. Every check in that version passed.
+
+  `layout_create` now waits for the WIDGET's own layout id to change before saving anything,
+  and refuses to save at all if it has not. A URL comparison is not evidence: the URL moves
+  without the chart loading, and trusting it is precisely what caused the rename. It also
+  refuses to run at all when the current chart has unsaved changes, since reaching the new
+  chart means navigating away from it — pass `discard_unsaved: true` to override.
+
+  Verified live: layout count 460 → 461, the user's layout untouched, the new layout listed
+  by the account rather than by the tool.
+
+### Changed
+
+- Tool count 109 → 112. All three new tools are classified as mutating: they are refused by a
+  read-only server and take the mutation lease.
+
 ## [2.4.2] - 2026-08-28
 
 ### Fixed

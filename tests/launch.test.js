@@ -73,3 +73,59 @@ test('Windows MSIX launch copies locally when the packaged app cannot bind CDP',
   assert.match(result.binary, /tvcontrol\\desktop-cache/);
   assert.ok(state.killed >= 1, 'fallback must stop the package before launching the local copy');
 });
+
+// ---------------------------------------------------------------------------
+// AN ALREADY-OPEN TRADINGVIEW IS THE COMMON CASE, NOT A BROKEN INSTALL.
+// Measured on a real buyer run: TradingView was open the ordinary way, the OS
+// refused a second copy, `tv_launch` threw a bare "exited immediately with code
+// 0", and the agent - having no remedy named anywhere in the error - told a
+// non-technical user to relaunch from a terminal. The remedy is a parameter on
+// this same tool, so the error has to name it.
+// ---------------------------------------------------------------------------
+
+const TV_MAC = '/Applications/TradingView.app/Contents/MacOS/TradingView';
+
+function macDeps({ running, killed = { n: 0 } } = {}) {
+  return {
+    platform: 'darwin',
+    home: '/Users/test',
+    existsSync: (p) => p === TV_MAC,
+    execFileSync: (file) => {
+      if (file === 'pgrep') {
+        if (!running) { const e = new Error('no match'); e.status = 1; throw e; }
+        return '4321\n';
+      }
+      if (file === 'pkill') { killed.n += 1; return ''; }
+      throw new Error(`Unexpected command: ${file}`);
+    },
+    spawn: () => child(),
+    spawnFailedEarly: async () => 'exited immediately with code 0',
+    delay: async () => {},
+    probeCdp: async () => null,
+  };
+}
+
+test('an already-running TradingView is reported as such, and names kill_existing', async () => {
+  await assert.rejects(
+    () => launch({ _deps: macDeps({ running: true }) }),
+    (err) => {
+      assert.match(err.message, /already running without the control port/i);
+      assert.match(err.message, /refused a second copy/i);
+      assert.match(err.hint, /kill_existing: true/);
+      assert.match(err.hint, /unsaved/i, 'the hint must warn that a restart discards unsaved work');
+      return true;
+    },
+  );
+});
+
+test('a genuine startup failure is NOT relabelled as an already-running instance', async () => {
+  await assert.rejects(
+    () => launch({ _deps: macDeps({ running: false }) }),
+    (err) => {
+      assert.match(err.message, /failed during startup/i);
+      assert.doesNotMatch(err.message, /already running/i);
+      assert.doesNotMatch(err.hint ?? '', /kill_existing/);
+      return true;
+    },
+  );
+});

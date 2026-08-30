@@ -941,3 +941,183 @@ export async function uiEvaluate({ expression }) {
   const result = await evaluate(expression);
   return { success: true, result };
 }
+
+
+/**
+ * Create a NEW chart layout and save it under a name.
+ *
+ * Why this exists: there was no way to MAKE a layout - `layout_list`,
+ * `layout_switch` and `layout_get_active` can only reach layouts the user
+ * already had. A first-run setup could therefore only borrow the tester's own
+ * chart, which is exactly how a "fresh install" run ends up proving nothing.
+ *
+ * 🔴 THE BUG THIS SHAPE EXISTS TO PREVENT - it happened, on a live account.
+ *
+ * `createNewLayout(name)` returns a new chart id and moves the URL via
+ * history.replaceState, but it does NOT load that chart into the running
+ * widget and it does NOT name anything. The widget keeps reporting the OLD
+ * layout. A first version created the chart, then called the save with
+ * `chartName`, and the save wrote to "the current chart" - which was still the
+ * user's own layout. It RENAMED THEIR CHART and reported
+ * `confirmed_in_account: true`, truthfully, about the wrong chart.
+ *
+ * So the widget must actually be ON the new chart before anything is saved.
+ * The only evidence that it is, is the widget's own layout id changing -
+ * not the URL, which moves without it. An earlier version compared URLs
+ * "because the id lagged". The id was not lagging; it was correct, and the URL
+ * was the misleading signal.
+ *
+ * Refuses outright when the current chart has unsaved work, because getting to
+ * the new chart means navigating away from it.
+ */
+export async function layoutCreate({ name, discard_unsaved = false, _deps } = {}) {
+  const title = String(name ?? '').trim();
+  if (!title) {
+    throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'A layout name is required.');
+  }
+
+  const before = await evaluate(`
+    (function(){
+      try {
+        var api = window.TradingViewApi;
+        if (!api) return { ok: false, error: 'TradingViewApi unavailable' };
+        var svc = api.getSaveChartService && api.getSaveChartService();
+        var dirty = null;
+        try { dirty = svc && svc.hasChanges ? !!svc.hasChanges() : null; } catch (e) {}
+        return { ok: true, layout_id: svc && svc.layoutId ? String(svc.layoutId()) : null, name: api.layoutName ? String(api.layoutName()) : null, dirty: dirty };
+      } catch (e) { return { ok: false, error: e.message }; }
+    })()
+  `);
+  if (!before || !before.ok || !before.layout_id) {
+    throw new ClassifiedError(
+      CATEGORIES.API_UNEXPECTED,
+      `Could not read the current chart before creating (${(before && before.error) || 'no layout id'})`,
+      { hint: 'Confirm TradingView is attached and a chart is open.' },
+    );
+  }
+  if (before.dirty && !discard_unsaved) {
+    throw new ClassifiedError(
+      CATEGORIES.INVALID_ARGUMENT,
+      `"${before.name || before.layout_id}" has unsaved changes, and creating a new layout navigates away from it.`,
+      { hint: 'Save that chart first, or pass discard_unsaved: true to throw those changes away.' },
+    );
+  }
+
+  const created = await evaluateAsync(`
+    (async function(){
+      try {
+        var api = window.TradingViewApi;
+        if (typeof api.createNewLayout !== 'function') return { ok: false, error: 'createNewLayout is not available on this TradingView build' };
+        var id = await api.createNewLayout(${JSON.stringify(title)});
+        if (id == null) return { ok: false, error: 'createNewLayout returned no id' };
+        // The chart it made is not loaded. Go to it for real.
+        location.href = '/chart/' + String(id) + '/';
+        return { ok: true, id: String(id) };
+      } catch (e) { return { ok: false, error: e.message }; }
+    })()
+  `);
+  if (!created || !created.ok) {
+    throw new ClassifiedError(
+      CATEGORIES.API_UNEXPECTED,
+      `Could not create a new chart (${(created && created.error) || 'unknown'})`,
+      { hint: 'This TradingView build may not expose createNewLayout. Report the Desktop version with tv_compatibility_check.' },
+    );
+  }
+
+  // WAIT FOR THE WIDGET, NOT THE URL. Navigation tears down the page, so each
+  // poll is its own evaluate and early ones are expected to fail.
+  let moved = null;
+  for (let i = 0; i < 30; i++) {
+    await new Promise((r) => setTimeout(r, 1000));
+    try {
+      const now = await evaluate(`
+        (function(){
+          try {
+            var api = window.TradingViewApi;
+            if (!api) return { ok: false };
+            var svc = api.getSaveChartService && api.getSaveChartService();
+            var id = svc && svc.layoutId ? String(svc.layoutId()) : null;
+            return { ok: !!id, layout_id: id, ready: !!(api.activeChart && api.activeChart()) };
+          } catch (e) { return { ok: false }; }
+        })()
+      `);
+      if (now && now.ok && now.ready && now.layout_id !== before.layout_id) { moved = now.layout_id; break; }
+    } catch (_) { /* page is still reloading */ }
+  }
+  if (!moved) {
+    throw new ClassifiedError(
+      CATEGORIES.API_UNEXPECTED,
+      `A new chart (${created.id}) was created but the window is still showing layout ${before.layout_id}. Nothing has been saved.`,
+      { hint: 'Refusing to save: saving now would write the new name onto the chart that is still loaded. Reload TradingView and retry.' },
+    );
+  }
+
+  const saved = await layoutSave({ name: title, _deps });
+  return {
+    success: true,
+    layout_id: created.id,
+    widget_layout_id: moved,
+    name: title,
+    previous_layout_id: before.layout_id,
+    previous_layout_name: before.name,
+    confirmed_in_account: saved.confirmed_in_account,
+    source: 'internal_api',
+  };
+}
+
+/**
+ * Save the current chart silently, optionally under a new name.
+ *
+ * `saveChartToServer` -> `_saveChartService.saveChartSilently` is the only save
+ * path on the API that does not go through a `controller.show()` modal. The
+ * third argument is an options object and `chartName` is what actually names
+ * the layout - `createNewLayout`'s argument does not.
+ *
+ * Proven by re-reading `getSavedCharts()`, because a save that reports itself
+ * is the call describing its own intentions.
+ */
+export async function layoutSave({ name, _deps } = {}) {
+  const title = name === undefined || name === null ? null : String(name).trim();
+  const r = await evaluateAsync(`
+    (async function(){
+      try {
+        var api = window.TradingViewApi;
+        if (!api || typeof api.saveChartToServer !== 'function') return { ok: false, error: 'saveChartToServer is not available on this TradingView build' };
+        var opts = ${title ? `{ chartName: ${JSON.stringify(title)} }` : 'undefined'};
+        api.saveChartToServer(undefined, undefined, opts);
+        await new Promise(function(r){ setTimeout(r, 3000); });
+        var charts = [];
+        try { charts = (await api.getSavedCharts()) || []; } catch (e) {}
+        var wanted = ${title ? JSON.stringify(title) : 'null'};
+        var match = wanted ? charts.filter(function(c){ return (c.name || c.title) === wanted; }) : [];
+        var svc = api.getSaveChartService && api.getSaveChartService();
+        var pending = null;
+        try { pending = svc && svc.hasChanges ? !!svc.hasChanges() : null; } catch (e) {}
+        return { ok: true, saved_count: charts.length, matches: match.map(function(c){ return { id: c.id, name: c.name || c.title }; }), unsaved_changes_remaining: pending };
+      } catch (e) { return { ok: false, error: e.message }; }
+    })()
+  `);
+  if (!r || !r.ok) {
+    throw new ClassifiedError(
+      CATEGORIES.API_UNEXPECTED,
+      `Could not save the chart (${(r && r.error) || 'unknown'})`,
+    );
+  }
+  // A named save that the account does not list is not a save. Reporting
+  // success here is exactly how layout_switch lied for three releases.
+  if (title && !(r.matches || []).length) {
+    throw new ClassifiedError(
+      CATEGORIES.API_UNEXPECTED,
+      `The chart was saved but no layout called "${title}" is listed on the account (${r.saved_count} saved charts read).`,
+      { hint: 'The save may still be in flight. Re-read with layout_list before retrying, so a second save does not create a duplicate.' },
+    );
+  }
+  return {
+    success: true,
+    saved_as: title,
+    confirmed_in_account: title ? true : null,
+    matches: r.matches,
+    unsaved_changes_remaining: r.unsaved_changes_remaining,
+    source: 'internal_api',
+  };
+}
