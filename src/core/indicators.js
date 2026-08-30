@@ -88,6 +88,56 @@ async function _closeDialog(evaluateFn, wait) {
   await wait(300);
 }
 
+/**
+ * A known-positive control for the search surface itself.
+ *
+ * The dialog renders an empty result list in two situations that look identical to a reader:
+ * the query genuinely matches nothing, and the indicator catalogue has not finished loading.
+ * The second happens for tens of seconds after TradingView is relaunched, and the account's
+ * own "My scripts" section is the last part to arrive. Reporting that as `count: 0` tells a
+ * caller a private script is missing when it is merely late, and a caller acting on that will
+ * send the user off to re-add something they already have.
+ *
+ * So an empty read is never returned until this control has been shown to match. It is a
+ * built-in study present on every account; if even this returns nothing, the surface is not
+ * answering and the honest answer is "not ready", not "not there".
+ */
+const READINESS_CONTROL_QUERY = 'RSI';
+const EMPTY_RETRIES = 6;
+const EMPTY_RETRY_MS = 500;
+
+async function _readRows(evaluateFn) {
+  const result = await evaluateFn(READ_RESULTS_JS);
+  if (!result?.open) throw new ClassifiedError(CATEGORIES.TV_UI_CHANGED, 'Indicators dialog closed during search');
+  return result.results || [];
+}
+
+/**
+ * Read the result rows, and never hand back an unverified empty.
+ *
+ * Returns `{ rows, controlCount }`. `controlCount` is null when rows were found without
+ * needing the control. Throws CHART_LOADING when the control also comes back empty.
+ */
+async function _readRowsOrProveEmpty(evaluateFn, wait, cleanQuery) {
+  let rows = await _readRows(evaluateFn);
+  for (let i = 0; rows.length === 0 && i < EMPTY_RETRIES; i++) {
+    await wait(EMPTY_RETRY_MS);
+    rows = await _readRows(evaluateFn);
+  }
+  if (rows.length > 0) return { rows, controlCount: null };
+
+  await _typeQuery(evaluateFn, wait, READINESS_CONTROL_QUERY);
+  const control = await _readRows(evaluateFn);
+  if (control.length === 0) {
+    throw new ClassifiedError(
+      CATEGORIES.CHART_LOADING,
+      `The indicator list is not answering: a control search for "${READINESS_CONTROL_QUERY}" also returned nothing, so an empty result for "${cleanQuery}" would be a false absence.`,
+      { hint: 'TradingView is still loading its indicator catalogue - this is normal for a while after it starts. Wait a few seconds and search again. Do not tell the user the indicator is missing on the strength of this.' },
+    );
+  }
+  return { rows: [], controlCount: control.length };
+}
+
 export async function searchStudies({ query, limit = 25, _deps } = {}) {
   const cleanQuery = String(query || '').trim();
   if (!cleanQuery) throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'query is required');
@@ -99,9 +149,15 @@ export async function searchStudies({ query, limit = 25, _deps } = {}) {
   await _openDialog(deps.evaluate, deps.wait);
   try {
     await _typeQuery(deps.evaluate, deps.wait, cleanQuery);
-    const result = await deps.evaluate(READ_RESULTS_JS);
-    if (!result?.open) throw new ClassifiedError(CATEGORIES.TV_UI_CHANGED, 'Indicators dialog closed during search');
-    return { success: true, query: cleanQuery, count: (result.results || []).slice(0, cap).length, results: (result.results || []).slice(0, cap) };
+    const { rows, controlCount } = await _readRowsOrProveEmpty(deps.evaluate, deps.wait, cleanQuery);
+    const capped = rows.slice(0, cap);
+    const out = { success: true, query: cleanQuery, count: capped.length, results: capped };
+    if (rows.length === 0) {
+      // Say WHY this zero can be trusted, so a caller can act on the absence.
+      out.verified_empty = true;
+      out.verified_by = { control_query: READINESS_CONTROL_QUERY, control_count: controlCount };
+    }
+    return out;
   } finally {
     await _closeDialog(deps.evaluate, deps.wait).catch(() => {});
   }
@@ -145,7 +201,14 @@ export async function addStudyFromSearch({ query, match, section, _deps } = {}) 
         return { clicked: pick.title, section: pick.section };
       })()
     `);
-    if (clicked?.error) throw new ClassifiedError(CATEGORIES.STUDY_NOT_FOUND, `${clicked.error}: ${want}`);
+    if (clicked?.error) {
+      // Same trap as searchStudies: "no matching study" and "the catalogue has not loaded"
+      // render identically. Prove the surface answers before blaming the study.
+      if (clicked.error === 'No matching study found') {
+        await _readRowsOrProveEmpty(deps.evaluate, deps.wait, cleanQuery);
+      }
+      throw new ClassifiedError(CATEGORIES.STUDY_NOT_FOUND, `${clicked.error}: ${want}`);
+    }
     await deps.wait(1500);
   } finally {
     await _closeDialog(deps.evaluate, deps.wait).catch(() => {});

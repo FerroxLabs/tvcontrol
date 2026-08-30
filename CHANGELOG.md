@@ -2,6 +2,31 @@
 
 All notable changes to TVControl are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [2.4.4] - 2026-08-30
+
+### Fixed
+
+- **`indicator_search` no longer reports an unverified zero.** It typed the query, waited a
+  fixed 1200 ms, read the dialog once, and returned whatever was on screen as
+  `success: true, count: 0`. An empty result list and a catalogue that has not finished
+  loading render identically, so "the account does not have this script" and "ask again in ten
+  seconds" came back as the same answer.
+
+  This cost a real buyer run. Forty-two seconds after TradingView was relaunched, a search for
+  the private study `TC-TIDE` returned `count: 0` on the account that owns it. The setup skill
+  read that as "not favourited yet" and told the user to go and add a script already sitting in
+  their My scripts list. The setup dead-ended there and no brief was ever produced.
+
+  An empty read is now retried, and then checked against a control query — a built-in study
+  present on every account. If the control matches, the zero is real and comes back with
+  `verified_empty: true` and the control's row count as evidence. If the control is empty too,
+  the surface is not answering and the call raises `chart_loading` rather than inventing an
+  absence. A search that finds rows is unchanged and never runs the control.
+
+- **`indicator_add_from_search` gets the same guard.** `No matching study found` had the
+  identical race: it could mean the study is absent, or that nothing had loaded yet. It now
+  proves the catalogue answers before classifying the failure as `study_not_found`.
+
 ## [2.4.3] - 2026-08-30
 
 ### Added
