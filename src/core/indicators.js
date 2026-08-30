@@ -2,6 +2,7 @@
  * Core indicator settings logic.
  */
 import { evaluate, safeString } from '../connection.js';
+import { waitForChartReady as _waitForChartReady } from '../wait.js';
 import { STUDY_RESOLVER_JS } from './_study_ref.js';
 import { ClassifiedError, CATEGORIES } from '../errors.js';
 
@@ -12,6 +13,7 @@ function _resolve(deps) {
   return {
     evaluate: deps?.evaluate || evaluate,
     wait: deps?.wait || ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
+    waitForChartReady: deps?.waitForChartReady || _waitForChartReady,
   };
 }
 
@@ -168,6 +170,18 @@ export async function addStudyFromSearch({ query, match, section, _deps } = {}) 
   if (!cleanQuery) throw new ClassifiedError(CATEGORIES.INVALID_ARGUMENT, 'query is required');
   const want = String(match || cleanQuery).trim();
   const deps = _resolve(_deps);
+  // A study cannot attach to a chart that has no series yet. On a chart created
+  // seconds earlier this returned "TradingView accepted <name> but no new study
+  // appeared" - the click landed, there was nothing to land on. Refuse up front
+  // rather than half-adding: nothing has been created at this point, so the
+  // caller can simply retry.
+  if ((await deps.waitForChartReady(null, null, 30000, { evaluate: deps.evaluate })) !== true) {
+    throw new ClassifiedError(
+      CATEGORIES.CHART_LOADING,
+      'The chart has no loaded series yet, so a study added now would not attach.',
+      { hint: 'Wait for the chart to finish loading - chart_get_state shows when it has bars - then add the study. A chart created moments ago is the usual case.' },
+    );
+  }
   const before = await deps.evaluate(`${CHART_API}.getAllStudies().map(function(s){return s.id;})`);
   await _openDialog(deps.evaluate, deps.wait);
 

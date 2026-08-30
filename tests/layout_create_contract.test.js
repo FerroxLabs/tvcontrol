@@ -116,3 +116,27 @@ describe('both tools are registered and reachable', () => {
     assert.match(tools, /core\.layoutSave\(/);
   });
 });
+
+describe('layout_create hands back a chart that can actually be used', () => {
+  // A brand-new chart has a widget long before it has a series. Measured on a
+  // live run: indicator_add_from_search returned "TradingView accepted TC-TIDE
+  // but no new study appeared" and chart_set_timeframe reported "Chart did not
+  // finish loading", both within seconds of layout_create returning success.
+  it('waits for a loaded series before it reports the layout', () => {
+    assert.match(createBody, /waitForChartReady/,
+      'layout_create must wait for real bars, not just for the widget id to change');
+    const waitAt = createBody.indexOf('waitForChartReady');
+    const saveAt = createBody.indexOf('layoutSave({');
+    assert.ok(waitAt !== -1 && saveAt !== -1 && waitAt < saveAt,
+      'the wait has to happen BEFORE the save, or the save races the load');
+  });
+
+  it('reports chart_ready from the wait, never as a literal', () => {
+    // `chart_ready: true` would satisfy any grep for the field while telling
+    // every caller the chart is usable whether or not it is - a field that
+    // cannot be false is not a signal.
+    assert.doesNotMatch(createBody, /chart_ready:\s*(true|false)\b/,
+      'chart_ready must be derived from the readiness wait, not hard-coded');
+    assert.match(createBody, /chart_ready:\s*chartReady/);
+  });
+});

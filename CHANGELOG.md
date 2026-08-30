@@ -2,6 +2,26 @@
 
 All notable changes to TVControl are documented here. This project follows [Semantic Versioning](https://semver.org/).
 
+## [2.4.5] - 2026-08-31
+
+### Fixed
+
+- **`layout_create` no longer hands back a chart that cannot be used.** It returned as soon as
+  the widget's layout id changed, which happens long before the chart has a series. Measured on
+  a live setup run: the very next calls failed - `indicator_add_from_search` reported
+  "TradingView accepted TC-TIDE but no new study appeared" and `chart_set_timeframe` reported
+  "Chart did not finish loading" twice - and the caller had to sleep and retry to recover work
+  this tool had already claimed was done.
+
+  It now waits for a loaded series (`waitForChartReady`, which the rest of the codebase already
+  used) before saving, and reports `chart_ready`. That is reported rather than thrown: the
+  layout exists and is named by this point, so raising here would make a retrying caller create
+  a duplicate.
+
+- **`indicator_add_from_search` refuses an unloaded chart** instead of half-adding to it.
+  Nothing has been created when it checks, so a retry is free - unlike the old behaviour, where
+  the click landed on a chart with nothing to attach to and reported an unexplained failure.
+
 ## [2.4.4] - 2026-08-30
 
 ### Fixed

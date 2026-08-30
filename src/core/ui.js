@@ -2,6 +2,7 @@
  * Core UI automation logic.
  */
 import { evaluate, evaluateAsync, getClient } from '../connection.js';
+import { waitForChartReady as _waitForChartReady } from '../wait.js';
 import { ClassifiedError, CATEGORIES } from '../errors.js';
 
 export async function click({ by, value }) {
@@ -1052,6 +1053,18 @@ export async function layoutCreate({ name, discard_unsaved = false, _deps } = {}
     );
   }
 
+  // THE WIDGET HAVING AN ID IS NOT THE CHART BEING USABLE.
+  //
+  // Measured on a live buyer run: layout_create returned, and the very next
+  // calls failed - indicator_add_from_search said "TradingView accepted TC-TIDE
+  // but no new study appeared", and chart_set_timeframe reported "Chart did not
+  // finish loading" twice. A brand-new chart has a widget long before it has a
+  // series, so the caller was handed a chart that could not yet take a study or
+  // a timeframe, and had to sleep and retry to recover. Wait for real bars here
+  // instead of making every caller rediscover it.
+  const readyFn = _deps?.waitForChartReady || _waitForChartReady;
+  const chartReady = await readyFn(null, null, 30000, _deps ? { evaluate: _deps.evaluate } : {});
+
   const saved = await layoutSave({ name: title, _deps });
   return {
     success: true,
@@ -1061,6 +1074,10 @@ export async function layoutCreate({ name, discard_unsaved = false, _deps } = {}
     previous_layout_id: before.layout_id,
     previous_layout_name: before.name,
     confirmed_in_account: saved.confirmed_in_account,
+    // Reported, not thrown: the layout exists and is named, so a caller that
+    // retried on an exception would create a duplicate. false means add the
+    // study and set the timeframe only after chart_get_state shows bars.
+    chart_ready: chartReady === true,
     source: 'internal_api',
   };
 }

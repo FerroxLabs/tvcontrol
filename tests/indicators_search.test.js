@@ -4,7 +4,10 @@ import assert from 'node:assert/strict';
 import { addStudyFromSearch, searchStudies } from '../src/core/indicators.js';
 import { ClassifiedError, CATEGORIES } from '../src/errors.js';
 
-function deps(sequence) {
+// chartReady defaults true so these fixtures keep testing what they were written
+// to test - result parsing and study selection. The gate that depends on it has
+// its own test below, where chartReady is false.
+function deps(sequence, { chartReady = true } = {}) {
   const calls = [];
   let index = 0;
   return {
@@ -14,6 +17,7 @@ function deps(sequence) {
         return sequence[index++];
       },
       wait: async () => {},
+      waitForChartReady: async () => chartReady,
     },
     calls,
   };
@@ -128,5 +132,18 @@ describe('indicator dialog search', () => {
     assert.equal(result.count, 1);
     assert.equal(result.verified_empty, undefined);
     assert.equal(calls.filter((c) => c.includes('RSI')).length, 0);
+  });
+
+  // MEASURED on a live run: seconds after layout_create, this returned
+  // "TradingView accepted TC-TIDE but no new study appeared" - the click landed
+  // on a chart that had no series to attach to. Nothing is created at this
+  // point, so refusing is safe and a retry costs nothing.
+  it('refuses to add a study to a chart that has no series yet', async () => {
+    const { _deps, calls } = deps([], { chartReady: false });
+    await assert.rejects(
+      addStudyFromSearch({ query: 'TC-TIDE', _deps }),
+      (error) => error instanceof ClassifiedError && error.category === CATEGORIES.CHART_LOADING,
+    );
+    assert.equal(calls.length, 0, 'it must refuse BEFORE touching the page');
   });
 });
