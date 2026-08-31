@@ -17,7 +17,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn, execFileSync } from 'node:child_process';
+import { spawn, spawnSync, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -27,6 +27,18 @@ const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const pkg = JSON.parse(fs.readFileSync(path.join(REPO, 'package.json'), 'utf8'));
 
 /** Complete a real MCP stdio handshake against `cmd argv`. Resolves a report, never throws. */
+// Under `shell: true` the direct child is cmd.exe, so killing it orphans the
+// real node process, which keeps a handle on the temp dir and makes the
+// teardown rmdir fail with EBUSY. Kill the whole tree on Windows.
+function killTree(child) {
+  if (!child.pid) return;
+  if (IS_WIN) {
+    try { spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' }); } catch { /* already gone */ }
+    return;
+  }
+  try { child.kill('SIGKILL'); } catch { /* already gone */ }
+}
+
 function probe(cmd, argv, cwd, opts = {}) {
   return new Promise((resolve) => {
     const child = spawn(cmd, argv, { cwd, stdio: ['pipe', 'pipe', 'pipe'], ...opts });
@@ -46,7 +58,7 @@ function probe(cmd, argv, cwd, opts = {}) {
       clearTimeout(timer);
       result.nonJson = nonJson.trim();
       result.stderr = err.trim().split('\n').slice(0, 4).join('\n');
-      try { child.kill('SIGKILL'); } catch { /* already gone */ }
+      killTree(child);
       resolve(result);
     }
     child.on('error', (e) => { result.reason = `PROBE_ERROR spawn ${e.message}`; finish(); });
@@ -105,7 +117,9 @@ const npmOpts = (opts) => (IS_WIN ? { ...opts, shell: true } : opts);
 
 test('the INSTALLED bin shim completes a real MCP handshake', { timeout: 300000 }, async (t) => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tvbin-'));
-  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+  // Windows releases file handles lazily even after the tree is dead, so the
+  // first rmdir can still hit EBUSY. maxRetries is Node's documented remedy.
+  t.after(() => fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }));
 
   // Production path: pack the working tree exactly as `npm publish` would, then install it.
   const tarName = execFileSync(NPM, npmArgs(['pack', '--pack-destination', tmp]), npmOpts({ cwd: REPO, encoding: 'utf8' })).trim().split('\n').pop();
