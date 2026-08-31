@@ -288,10 +288,49 @@ export async function connect() {
   }
 }
 
+/**
+ * WHO IS ACTUALLY ANSWERING ON THE CONTROL PORT?
+ *
+ * 9222 is the universally-known Chrome remote-debugging port. MEASURED on a real
+ * machine: the user had Chrome listening on 9222, TradingView was launched with
+ * `--remote-debugging-port=9222`, its debug server LOST THE BIND and never
+ * retried, and this connector happily attached to the user's browser instead.
+ * Every call then failed with "No TradingView chart target found", which blames
+ * TradingView for something it never did.
+ *
+ * Worse than the confusing message: having attached to a stranger's browser, the
+ * read tools went on to EVALUATE JAVASCRIPT in whatever authenticated page was
+ * open there. That must never be possible by accident.
+ *
+ * 🔴 `Browser` DOES NOT DISCRIMINATE. TradingView is Electron and reports
+ * `Chrome/146.0.7680.216`; Chrome reports `Chrome/152.0.7977.65`. They are the
+ * same shape. The `User-Agent` is what separates them - TradingView's carries
+ * `TradingView/<v>` and `TVDesktop/<v>`. Checking `Browser` would be a check
+ * that cannot fail.
+ */
+export const TV_IDENTITY_MARKER = 'TVDesktop/';
+
+export async function assertEndpointIsTradingView(fetchJson = _fetchCdpJson) {
+  const version = await fetchJson('/json/version', { timeoutMs: 3000 });
+  const userAgent = String(version?.['User-Agent'] ?? '');
+  if (userAgent.includes(TV_IDENTITY_MARKER)) return version;
+  const who = userAgent ? userAgent.slice(0, 120) : `Browser=${String(version?.Browser ?? 'unknown')}`;
+  throw new ClassifiedError(
+    CATEGORIES.TV_NOT_RUNNING,
+    `Port ${CDP_PORT} is answering, but it is NOT TradingView - it is: ${who}`,
+    {
+      hint: `Something else already holds port ${CDP_PORT} (Chrome's default remote-debugging port). TradingView cannot bind it, and a TradingView started while the port was taken stays deaf for the rest of its life - freeing the port later does NOT heal it. Quit whatever owns the port, then relaunch TradingView with tv_launch and kill_existing: true. To use a different port instead, set TV_CDP_PORT on both this server and the TradingView launch.`,
+    },
+  );
+}
+
 async function _connect() {
   let lastError;
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
+      // Identity BEFORE targets: if another browser owns the port, say so plainly
+      // instead of reporting "no chart target" against TradingView.
+      await assertEndpointIsTradingView();
       const target = await findChartTarget();
       if (!target) {
         throw new ClassifiedError(
