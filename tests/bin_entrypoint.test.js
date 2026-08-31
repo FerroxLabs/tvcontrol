@@ -92,19 +92,27 @@ test('the bin target carries a shebang so the installed shim is executable', () 
     `bin target ${pkg.bin.tvcontrol} line 1 is ${JSON.stringify(firstLine)}; without a shebang the shim is run by the shell and dies with "import: command not found"`);
 });
 
-// execFileSync does no PATHEXT resolution, so bare 'npm' is ENOENT on Windows.
-const NPM = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+// Two separate Windows traps. execFileSync does no PATHEXT resolution, so bare
+// 'npm' is ENOENT; and since the CVE-2024-27980 mitigation (Node 18.20.2 /
+// 20.12.2) child_process REFUSES to spawn a .cmd at all without `shell: true`,
+// which surfaces as EINVAL. Both are avoided by going through the shell on
+// Windows only. Under `shell: true` the args are re-parsed by cmd.exe, so any
+// argument containing a space must be quoted here.
+const IS_WIN = process.platform === 'win32';
+const NPM = IS_WIN ? 'npm.cmd' : 'npm';
+const npmArgs = (args) => (IS_WIN ? args.map((a) => (/\s/.test(a) ? `"${a}"` : a)) : args);
+const npmOpts = (opts) => (IS_WIN ? { ...opts, shell: true } : opts);
 
 test('the INSTALLED bin shim completes a real MCP handshake', { timeout: 300000 }, async (t) => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tvbin-'));
   t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
 
   // Production path: pack the working tree exactly as `npm publish` would, then install it.
-  const tarName = execFileSync(NPM, ['pack', '--pack-destination', tmp], { cwd: REPO, encoding: 'utf8' }).trim().split('\n').pop();
+  const tarName = execFileSync(NPM, npmArgs(['pack', '--pack-destination', tmp]), npmOpts({ cwd: REPO, encoding: 'utf8' })).trim().split('\n').pop();
   const tarball = path.join(tmp, tarName);
   fs.writeFileSync(path.join(tmp, 'package.json'), JSON.stringify({ name: 'probe-host', private: true, version: '0.0.0' }));
-  execFileSync(NPM, ['install', '--omit=dev', '--no-audit', '--no-fund', '--cache', path.join(tmp, '.npmcache'), tarball],
-    { cwd: tmp, encoding: 'utf8', stdio: 'pipe' });
+  execFileSync(NPM, npmArgs(['install', '--omit=dev', '--no-audit', '--no-fund', '--cache', path.join(tmp, '.npmcache'), tarball]),
+    npmOpts({ cwd: tmp, encoding: 'utf8', stdio: 'pipe' }));
 
   const installed = path.join(tmp, 'node_modules', '@ferroxlabs', 'tvcontrol');
   const shim = path.join(tmp, 'node_modules', '.bin', 'tvcontrol');
