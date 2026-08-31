@@ -84,20 +84,26 @@ test('bin.tvcontrol names the MCP server, not the human CLI', () => {
 });
 
 test('the bin target carries a shebang so the installed shim is executable', () => {
-  const firstLine = fs.readFileSync(path.join(REPO, pkg.bin.tvcontrol), 'utf8').split('\n')[0];
+  // A Windows checkout (core.autocrlf) rewrites LF to CRLF, so line 1 arrives as
+  // "#!/usr/bin/env node\r". Strip ONLY a trailing CR: a genuinely missing or wrong
+  // shebang still fails, which is the whole point of this test.
+  const firstLine = fs.readFileSync(path.join(REPO, pkg.bin.tvcontrol), 'utf8').split('\n')[0].replace(/\r$/, '');
   assert.equal(firstLine, '#!/usr/bin/env node',
     `bin target ${pkg.bin.tvcontrol} line 1 is ${JSON.stringify(firstLine)}; without a shebang the shim is run by the shell and dies with "import: command not found"`);
 });
+
+// execFileSync does no PATHEXT resolution, so bare 'npm' is ENOENT on Windows.
+const NPM = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 
 test('the INSTALLED bin shim completes a real MCP handshake', { timeout: 300000 }, async (t) => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tvbin-'));
   t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
 
   // Production path: pack the working tree exactly as `npm publish` would, then install it.
-  const tarName = execFileSync('npm', ['pack', '--pack-destination', tmp], { cwd: REPO, encoding: 'utf8' }).trim().split('\n').pop();
+  const tarName = execFileSync(NPM, ['pack', '--pack-destination', tmp], { cwd: REPO, encoding: 'utf8' }).trim().split('\n').pop();
   const tarball = path.join(tmp, tarName);
   fs.writeFileSync(path.join(tmp, 'package.json'), JSON.stringify({ name: 'probe-host', private: true, version: '0.0.0' }));
-  execFileSync('npm', ['install', '--omit=dev', '--no-audit', '--no-fund', '--cache', path.join(tmp, '.npmcache'), tarball],
+  execFileSync(NPM, ['install', '--omit=dev', '--no-audit', '--no-fund', '--cache', path.join(tmp, '.npmcache'), tarball],
     { cwd: tmp, encoding: 'utf8', stdio: 'pipe' });
 
   const installed = path.join(tmp, 'node_modules', '@ferroxlabs', 'tvcontrol');

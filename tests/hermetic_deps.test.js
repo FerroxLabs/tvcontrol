@@ -22,7 +22,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { readFileSync, readdirSync } from 'node:fs';
-import { dirname, join as pjoin } from 'node:path';
+import { dirname, join as pjoin, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { restore, snapshot } from '../src/core/state.js';
@@ -150,7 +150,7 @@ describe('every direct path to the browser is guarded', () => {
   it('every raw CDP() and http.get to the CDP port calls _assertCdpAllowed', () => {
     const unguarded = [];
     for (const file of walk(SRC)) {
-      if (file.endsWith(`${'/'}connection.js`)) continue; // defines the guard
+      if (file === pjoin(SRC, 'connection.js')) continue; // defines the guard (path-separator safe)
       const src = readFileSync(file, 'utf8');
       const lines = src.split('\n');
       lines.forEach((line, i) => {
@@ -160,7 +160,7 @@ describe('every direct path to the browser is guarded', () => {
         // The guard may be on this line or in the few lines just above it.
         const window = lines.slice(Math.max(0, i - 8), i + 1).join('\n');
         if (!window.includes('_assertCdpAllowed')) {
-          unguarded.push(`${file.replace(SRC, 'src')}:${i + 1}  ${line.trim().slice(0, 80)}`);
+          unguarded.push(`${file.replace(SRC, 'src').split(sep).join('/')}:${i + 1}  ${line.trim().slice(0, 80)}`);
         }
       });
     }
