@@ -27,9 +27,9 @@ const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const pkg = JSON.parse(fs.readFileSync(path.join(REPO, 'package.json'), 'utf8'));
 
 /** Complete a real MCP stdio handshake against `cmd argv`. Resolves a report, never throws. */
-function probe(cmd, argv, cwd) {
+function probe(cmd, argv, cwd, opts = {}) {
   return new Promise((resolve) => {
-    const child = spawn(cmd, argv, { cwd, stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(cmd, argv, { cwd, stdio: ['pipe', 'pipe', 'pipe'], ...opts });
     let out = '';
     let err = '';
     let nonJson = '';
@@ -115,8 +115,13 @@ test('the INSTALLED bin shim completes a real MCP handshake', { timeout: 300000 
     npmOpts({ cwd: tmp, encoding: 'utf8', stdio: 'pipe' }));
 
   const installed = path.join(tmp, 'node_modules', '@ferroxlabs', 'tvcontrol');
-  const shim = path.join(tmp, 'node_modules', '.bin', 'tvcontrol');
-  assert.ok(fs.existsSync(shim), 'install produced no node_modules/.bin/tvcontrol shim');
+  // npm writes THREE shims on Windows: an extensionless sh script (for Cygwin),
+  // plus tvcontrol.cmd and tvcontrol.ps1. Windows cannot execute the
+  // extensionless one -- spawn returns ENOENT -- and .cmd needs a shell. The
+  // .cmd IS the real resolution target there, so that is what this must exercise.
+  const shimBase = path.join(tmp, 'node_modules', '.bin', 'tvcontrol');
+  const shim = IS_WIN ? `${shimBase}.cmd` : shimBase;
+  assert.ok(fs.existsSync(shim), `install produced no ${path.basename(shim)} shim`);
 
   // KNOWN-POSITIVE CONTROL, same install, same moment: the server file itself must handshake.
   // If this is not green the probe is broken and the shim's RED means nothing.
@@ -125,7 +130,7 @@ test('the INSTALLED bin shim completes a real MCP handshake', { timeout: 300000 
   assert.ok(control.ok, `known-positive control failed: ${control.reason ?? ''} ${control.nonJson} ${control.stderr}`);
 
   // The real spawn path — what `npx` / `bun x --bun` resolve to.
-  const real = await probe(shim, [], tmp);
+  const real = await probe(shim, [], tmp, IS_WIN ? { shell: true } : {});
   console.log(`[BIN] ./node_modules/.bin/tvcontrol -> ok=${real.ok} TOOL_COUNT ${real.toolCount} exit=${real.exit} ${real.reason ?? ''}`);
   if (real.nonJson) console.log(`[BIN] NONJSON_STDOUT: ${real.nonJson.split('\n')[0]}`);
   if (real.stderr) console.log(`[BIN] STDERR: ${real.stderr}`);
