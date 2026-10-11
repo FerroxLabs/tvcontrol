@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/ferroxlabs-tvcontrol-badge.png)](https://mseep.ai/app/ferroxlabs-tvcontrol)
+
 <p align="center">
   <img src="./assets/hero.png" alt="TVControl. TradingView MCP System. Backtest, optimize, scan, write Pine. All local, all on command." width="100%" />
 </p>
